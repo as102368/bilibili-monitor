@@ -2,58 +2,60 @@ import asyncio
 from typing import List, Dict, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import requests
 
 from .wbi import WBI
 from .database import DownloadDB
 from .downloader import Downloader
-from .credential_manager import export_cookies_to_netscape
+from .web_client import BilibiliWebClient
+from .video_stream import VideoStream
+from .ctfile_uploader import CtfileUploader
 
 
 class BilibiliMonitor:
-    HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://t.bilibili.com",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-
     def __init__(self, config: dict):
         self.config = config
         self.sessdata = config["cookie"]["sessdata"]
         self.db = DownloadDB(config["database"]["path"])
         self.wbi = WBI(self.sessdata)
 
-        cookies_path = "data/cookies_netscape.txt"
-        export_cookies_to_netscape(
-            self.sessdata,
-            config["cookie"]["bili_jct"],
-            config["cookie"].get("buvid3", ""),
-            config["cookie"].get("dedeuserid", ""),
-            cookies_path,
+        # 仿照 DownKyi：使用统一 WebClient，自动获取 buvid3/buvid4 并复用连接
+        self.web = BilibiliWebClient(
+            sessdata=self.sessdata,
+            bili_jct=config["cookie"]["bili_jct"],
+            buvid3=config["cookie"].get("buvid3", ""),
+            dedeuserid=config["cookie"].get("dedeuserid", ""),
         )
+
+        # 仿照 DownKyi：VideoStream 获取直链，Downloader 使用 requests + FFmpeg
+        self.video_stream = VideoStream(self.web, self.wbi)
+
+        # 城通网盘上传器（可选）
+        ctfile_cfg = config.get("ctfile", {})
+        ctfile_uploader = None
+        if ctfile_cfg.get("upload_after_download") and ctfile_cfg.get("session"):
+            ctfile_uploader = CtfileUploader(
+                session_token=ctfile_cfg["session"],
+                folder_id=ctfile_cfg.get("folder_id", "0"),
+            )
+
         self.downloader = Downloader(
             output_dir=config["download"]["output_dir"],
             quality=config["download"]["quality"],
             template=config["download"]["filename_template"],
-            cookies_path=cookies_path,
+            web_client=self.web,
+            video_stream=self.video_stream,
+            ctfile_uploader=ctfile_uploader,
         )
 
         self.scheduler = AsyncIOScheduler()
         self.my_mid: int = 0
 
     def _sync_auth_check(self):
-        cookies = {"SESSDATA": self.sessdata}
-        resp = requests.get(
+        data = self.web.request(
             "https://api.bilibili.com/x/web-interface/nav",
-            headers=self.HEADERS,
-            cookies=cookies,
+            referer="https://www.bilibili.com",
             timeout=10,
         )
-        data = resp.json()
         if data.get("code") != 0:
             raise RuntimeError(f"登录验证失败: {data}")
         self.my_mid = data["data"]["mid"]
@@ -66,15 +68,12 @@ class BilibiliMonitor:
 
     async def _fetch_dynamic_videos(self) -> List[Dict]:
         def _fetch():
-            cookies = {"SESSDATA": self.sessdata}
-            resp = requests.get(
+            data = self.web.request(
                 "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all",
+                referer="https://t.bilibili.com",
                 params={"type": "all", "timezone_offset": -480},
-                headers=self.HEADERS,
-                cookies=cookies,
                 timeout=15,
             )
-            data = resp.json()
             if data.get("code") != 0:
                 raise RuntimeError(f"获取动态失败: {data}")
             return data["data"].get("items", [])
@@ -127,15 +126,14 @@ class BilibiliMonitor:
             if self.db.is_downloaded(bvid):
                 continue
 
-            print(f"[New] {uname} 发布新视频: {title} (BV{bvid})")
-            url = f"https://www.bilibili.com/video/{bvid}"
-            success = self.downloader.download(url)
+            print(f"[New] {uname} 发布新视频: {title} ({bvid})")
+            success = self.downloader.download(bvid, title, uname)
             if success:
                 self.db.mark_downloaded(bvid, title, uname, mid)
-                print(f"[Done] BV{bvid} 下载完成")
+                print(f"[Done] {bvid} 下载完成")
                 new_count += 1
             else:
-                print(f"[Fail] BV{bvid} 下载失败，将在下次重试")
+                print(f"[Fail] {bvid} 下载失败，将在下次重试")
 
             await asyncio.sleep(2)
 

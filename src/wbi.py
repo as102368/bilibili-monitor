@@ -1,6 +1,7 @@
 import hashlib
 import time
 import urllib.parse
+
 import requests
 
 MIXIN_KEY_ENC_TAB = [
@@ -29,7 +30,7 @@ class WBI:
     def _refresh_keys(self):
         headers = {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
             "Referer": "https://www.bilibili.com",
@@ -42,7 +43,7 @@ class WBI:
             timeout=10,
         )
         data = resp.json()
-        if data.get("code") != 0:
+        if data.get("code") != 0 and data.get("code") != -101:
             raise RuntimeError(f"获取WBI密钥失败: {data}")
         wbi_img = data["data"]["wbi_img"]
         self._img_key = wbi_img["img_url"].rsplit("/", 1)[-1].split(".")[0]
@@ -51,9 +52,16 @@ class WBI:
     def sign(self, params: dict) -> dict:
         mixin_key = _get_mixin_key(self._img_key + self._sub_key)
         params["wts"] = int(time.time())
+        # 过滤空值
         filtered = {k: v for k, v in params.items() if v not in ("", None)}
-        sorted_params = sorted(filtered.items())
-        query = urllib.parse.urlencode(sorted_params)
+        # 仿照 DownKyi WbiSign.EncWbi：
+        # 1. 对 value 过滤掉 !'()* 字符
+        # 2. 使用标准 URL 编码（空格 -> %20）
+        cleaned = {}
+        for k, v in sorted(filtered.items()):
+            val = str(v).translate(str.maketrans("", "", "!'()*"))
+            cleaned[k] = val
+        query = urllib.parse.urlencode(cleaned, safe="", quote_via=urllib.parse.quote)
         w_rid = _md5(query + mixin_key)
         params["w_rid"] = w_rid
         return params
