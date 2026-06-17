@@ -7,6 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('ffmpeg', 'ffmpeg'),
+        ('tools/aria2', 'tools/aria2'),
         ('config.yaml', '.'),
         ('src', 'src'),
     ],
@@ -49,6 +50,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='C:/Users/EDY/Desktop/logo.png',
 )
 coll = COLLECT(
     exe,
