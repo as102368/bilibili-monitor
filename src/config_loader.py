@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
         "output_dir": "./downloads",
         "quality": "best",
         "filename_template": "%(uploader)s - %(title)s [%(id)s].%(ext)s",
+        "concurrent_downloads": 2,
     },
     "database": {
         "path": "./data/downloaded.db",

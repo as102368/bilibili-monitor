@@ -1,4 +1,5 @@
 import asyncio
+import random
 from datetime import datetime
 from typing import List, Dict, Optional
 
@@ -53,7 +54,8 @@ class BilibiliMonitor:
         )
 
         self.scheduler = AsyncIOScheduler()
-        self._download_sem = asyncio.Semaphore(1)
+        concurrent = max(1, min(5, config["download"].get("concurrent_downloads", 2)))
+        self._download_sem = asyncio.Semaphore(concurrent)
         self.my_mid: int = 0
 
     def _sync_auth_check(self):
@@ -110,6 +112,13 @@ class BilibiliMonitor:
             return BilibiliMonitor._extract_video_from_dynamic(orig)
         return None
 
+    async def _throttled_download(self, bvid: str, title: str, uname: str, stagger_delay: float):
+        """错峰下载：先冷却再进入并发槽位，避免 API 请求同时爆发触发风控"""
+        await asyncio.sleep(stagger_delay)
+        async with self._download_sem:
+            result = await asyncio.to_thread(self.downloader.download, bvid, title, uname)
+        return result
+
     async def check_all(self):
         try:
             items = await self._fetch_dynamic_videos()
@@ -118,37 +127,48 @@ class BilibiliMonitor:
             return
 
         page_size = self.config["monitor"].get("page_size", 20)
-        new_count = 0
+        new_videos = []
         for item in items[:page_size]:
             try:
                 video = self._extract_video_from_dynamic(item)
                 if not video or not video.get("bvid"):
                     continue
-
-                bvid = video["bvid"]
-                title = video["title"]
-                uname = video["uname"]
-                mid = video["mid"]
-
-                if self.db.is_downloaded(bvid):
+                if self.db.is_downloaded(video["bvid"]):
                     continue
-
-                logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
-                async with self._download_sem:
-                    result = await asyncio.to_thread(self.downloader.download, bvid, title, uname)
-                if result.get("success"):
-                    self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
-                    logger.info(f"[Done] {bvid} 下载完成")
-                    new_count += 1
-                else:
-                    logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试")
-
-                await asyncio.sleep(2)
+                new_videos.append(video)
             except Exception as e:
-                logger.error(f"[Monitor] 处理视频时异常: {e}")
+                logger.error(f"[Monitor] 解析动态时异常: {e}")
 
-        if new_count == 0:
+        if not new_videos:
             logger.info("[Monitor] 暂无新视频")
+            return
+
+        # 错峰启动：每个视频间隔 4~6 秒，避免同时请求 playurl 触发 412
+        tasks = []
+        for idx, video in enumerate(new_videos):
+            bvid = video["bvid"]
+            title = video["title"]
+            uname = video["uname"]
+            logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
+            delay = idx * random.uniform(4, 6)
+            task = asyncio.create_task(
+                self._throttled_download(bvid, title, uname, delay)
+            )
+            tasks.append((task, bvid, title, uname, video["mid"]))
+
+        results = await asyncio.gather(*[t[0] for t in tasks], return_exceptions=True)
+
+        new_count = 0
+        for (task, bvid, title, uname, mid), result in zip(tasks, results):
+            if isinstance(result, Exception):
+                logger.error(f"[Monitor] 下载异常 {bvid}: {result}")
+                continue
+            if result.get("success"):
+                self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
+                logger.info(f"[Done] {bvid} 下载完成")
+                new_count += 1
+            else:
+                logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试")
 
     def start(self):
         interval = self.config["monitor"]["interval"]

@@ -85,6 +85,12 @@ class ConfigTab(QWidget):
 
         self.filename_template_edit = QLineEdit()
         download_form.addRow("文件名模板:", self.filename_template_edit)
+
+        self.concurrent_spin = QSpinBox()
+        self.concurrent_spin.setRange(1, 5)
+        self.concurrent_spin.setSuffix(" 个")
+        download_form.addRow("同时下载数:", self.concurrent_spin)
+
         download_group.setLayout(download_form)
         layout.addWidget(download_group)
 
@@ -132,6 +138,7 @@ class ConfigTab(QWidget):
         self.filename_template_edit.setText(
             download.get("filename_template", "%(uploader)s - %(title)s [%(id)s].%(ext)s")
         )
+        self.concurrent_spin.setValue(download.get("concurrent_downloads", 2))
 
         ctfile = config.get("ctfile", {})
         self.ctfile_session_edit.setText(ctfile.get("session", ""))
@@ -154,6 +161,7 @@ class ConfigTab(QWidget):
                 "output_dir": self.output_dir_edit.text().strip(),
                 "quality": self.quality_combo.currentText(),
                 "filename_template": self.filename_template_edit.text().strip(),
+                "concurrent_downloads": self.concurrent_spin.value(),
             },
             "database": {
                 "path": "./data/downloaded.db",

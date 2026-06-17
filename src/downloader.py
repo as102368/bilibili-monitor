@@ -1,3 +1,4 @@
+import glob
 import os
 import re
 import subprocess
@@ -26,6 +27,37 @@ def _get_ffmpeg_path() -> str:
     if os.path.isfile(builtin):
         return builtin
     return "ffmpeg"
+
+
+def _get_aria2c_path() -> str:
+    """优先查找项目内置的 aria2c，其次查找 PATH 中的 aria2c"""
+    builtin_pattern = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "tools", "aria2", "**", "aria2c.exe"
+    )
+    try:
+        matches = glob.glob(builtin_pattern, recursive=True)
+        if matches:
+            return matches[0]
+    except Exception:
+        pass
+    # 检查 PATH
+    for cmd in ["aria2c.exe", "aria2c"]:
+        for path in os.environ.get("PATH", "").split(os.pathsep):
+            exe = os.path.join(path.strip('"'), cmd)
+            if os.path.isfile(exe):
+                return exe
+    return "aria2c"
+
+
+def _aria2c_available(path: str) -> bool:
+    try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        subprocess.run([path, "-v"], check=True, **kwargs)
+        return True
+    except Exception:
+        return False
 
 
 class Downloader:
@@ -75,6 +107,12 @@ class Downloader:
         self.ctfile_uploader = ctfile_uploader
         self.db = db
         self.ffmpeg_path = _get_ffmpeg_path()
+        self.aria2c_path = _get_aria2c_path()
+        self.use_aria2 = _aria2c_available(self.aria2c_path)
+        if self.use_aria2:
+            logger.info(f"[Downloader] 使用 Aria2 下载器: {self.aria2c_path}")
+        else:
+            logger.warning("[Downloader] 未检测到 Aria2，将回退到 requests 下载")
         os.makedirs(output_dir, exist_ok=True)
 
     def _sanitize_filename(self, name: str) -> str:
@@ -105,7 +143,73 @@ class Downloader:
         return filename
 
     def _download_file(self, url: str, output_path: str, referer: str) -> bool:
-        """使用 requests 下载单个文件，仿照 DownKyi Aria2c 的直链下载"""
+        """使用 Aria2c 下载单个文件，失败时回退到 requests"""
+        if self.use_aria2:
+            if self._download_file_aria2(url, output_path, referer):
+                return True
+            logger.warning(f"[Download] Aria2 下载失败，回退到 requests: {os.path.basename(output_path)}")
+        return self._download_file_requests(url, output_path, referer)
+
+    def _download_file_aria2(self, url: str, output_path: str, referer: str) -> bool:
+        """调用 aria2c 进行多线程下载"""
+        try:
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            output_name = os.path.basename(output_path)
+            cookie_str = self.web.get_cookie_string()
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Referer": referer,
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            }
+
+            cmd = [
+                self.aria2c_path,
+                url,
+                "-o", output_name,
+                "--dir", output_dir,
+                "--header", f"User-Agent: {headers['User-Agent']}",
+                "--header", f"Referer: {headers['Referer']}",
+                "--header", f"Accept: {headers['Accept']}",
+                "--header", f"Accept-Language: {headers['Accept-Language']}",
+                "-x", "16",
+                "-s", "16",
+                "-k", "1M",
+                "--max-tries", "3",
+                "--timeout", "60",
+                "--auto-file-renaming=false",
+                "--allow-overwrite=true",
+                "--quiet",
+                "--console-log-level=warn",
+            ]
+            if cookie_str:
+                cmd.extend(["--header", f"Cookie: {cookie_str}"])
+
+            kwargs = {
+                "check": True,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            logger.info(f"[Aria2] 开始下载: {output_name}")
+            subprocess.run(cmd, **kwargs)
+            logger.info(f"[Aria2] 下载完成: {output_name}")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(f"[Aria2] 下载失败 {url} (exit code {e.returncode})")
+            return False
+        except Exception as e:
+            logger.error(f"[Aria2] 下载异常 {url}: {e}")
+            return False
+
+    def _download_file_requests(self, url: str, output_path: str, referer: str) -> bool:
+        """使用 requests 下载单个文件（回退方案）"""
         try:
             headers = {
                 "User-Agent": (
