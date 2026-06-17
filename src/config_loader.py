@@ -1,6 +1,8 @@
 import os
 import yaml
 
+# 程序根目录，打包后统一放在该目录下
+BASE_DIR = r"D:\BI\bilibili-monitor"
 
 DEFAULT_CONFIG = {
     "cookie": {
@@ -24,7 +26,9 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config(path="config.yaml"):
+def load_config(path=None):
+    if path is None:
+        path = os.path.join(BASE_DIR, "config.yaml")
     if not os.path.exists(path):
         save_config(DEFAULT_CONFIG, path)
         print(f"已创建默认配置文件: {path}，请先填写 Cookie 后再运行")
@@ -36,7 +40,9 @@ def load_config(path="config.yaml"):
     return merged
 
 
-def save_config(config, path="config.yaml"):
+def save_config(config, path=None):
+    if path is None:
+        path = os.path.join(BASE_DIR, "config.yaml")
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
