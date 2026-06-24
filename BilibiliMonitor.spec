@@ -24,11 +24,18 @@ a = Analysis(
         'src.config_loader',
         'src.logger',
         'src.gui.log_handler',
+        'src.gui.filename_template_builder',
+        'src.gui.qr_login_dialog',
+        'src.gui.user_center_dialog',
+        'qrcode',
+        'qrcode.image.pil',
+        'PIL',
+        'PIL.ImageQt',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['PyQt6', 'PyQt5', 'PySide2'],
     noarchive=False,
     optimize=0,
 )
@@ -50,7 +57,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='C:/Users/EDY/Desktop/logo.png',
 )
 coll = COLLECT(
     exe,

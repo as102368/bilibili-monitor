@@ -51,6 +51,8 @@ class BilibiliMonitor:
             video_stream=self.video_stream,
             ctfile_uploader=ctfile_uploader,
             db=self.db,
+            time_format=config["download"].get("time_format", "yyyy-MM-dd HH-mm-ss"),
+            index_format=config["download"].get("index_format", "自然数"),
         )
 
         self.scheduler = AsyncIOScheduler()
@@ -128,7 +130,7 @@ class BilibiliMonitor:
 
         page_size = self.config["monitor"].get("page_size", 20)
         new_videos = []
-        for item in items[:page_size]:
+        for item in items:
             try:
                 video = self._extract_video_from_dynamic(item)
                 if not video or not video.get("bvid"):
@@ -143,12 +145,31 @@ class BilibiliMonitor:
             logger.info("[Monitor] 暂无新视频")
             return
 
+        # 限制本次同时下载的数量
+        new_videos = new_videos[:page_size]
+
         # 错峰启动：每个视频间隔 4~6 秒，避免同时请求 playurl 触发 412
         tasks = []
         for idx, video in enumerate(new_videos):
             bvid = video["bvid"]
             title = video["title"]
             uname = video["uname"]
+
+            # 检查失败重试次数
+            failure_info = self.db.get_pending_failure_info(bvid)
+            fail_count = failure_info.get("fail_count", 0)
+            if fail_count > 0:
+                reason = failure_info.get("reason", "")
+                if "充电专属" in reason:
+                    logger.debug(f"[Monitor] {bvid} 为充电专属视频，跳过下载")
+                    continue
+                if fail_count >= 5:
+                    logger.debug(
+                        f"[Monitor] {bvid} 已达到最大重试次数 ({fail_count}/5)，跳过: {reason}"
+                    )
+                    self.db.mark_failure_skipped(bvid)
+                    continue
+
             logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
             delay = idx * random.uniform(4, 6)
             task = asyncio.create_task(
@@ -159,6 +180,7 @@ class BilibiliMonitor:
         results = await asyncio.gather(*[t[0] for t in tasks], return_exceptions=True)
 
         new_count = 0
+        ctfile_retry_tasks = []
         for (task, bvid, title, uname, mid), result in zip(tasks, results):
             if isinstance(result, Exception):
                 logger.error(f"[Monitor] 下载异常 {bvid}: {result}")
@@ -168,7 +190,145 @@ class BilibiliMonitor:
                 logger.info(f"[Done] {bvid} 下载完成")
                 new_count += 1
             else:
-                logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试")
+                reason = result.get("reason", "")
+                if "城通网盘上传失败" in reason:
+                    logger.warning(f"[Monitor] {bvid} 城通网盘上传失败，10 秒后自动重试")
+                    ctfile_retry_tasks.append(asyncio.create_task(self._retry_ctfile_upload(bvid, title, uname, mid)))
+                else:
+                    logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试")
+
+        if ctfile_retry_tasks:
+            await asyncio.gather(*ctfile_retry_tasks, return_exceptions=True)
+
+    async def _retry_ctfile_upload(self, bvid: str, title: str, uname: str, mid: int):
+        """城通网盘上传失败后等待 10 秒重新下载并上传"""
+        await asyncio.sleep(10)
+        async with self._download_sem:
+            result = await asyncio.to_thread(self.downloader.download, bvid, title, uname)
+        if result.get("success"):
+            self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
+            logger.info(f"[Retry-Done] {bvid} 重试下载上传完成")
+        else:
+            logger.warning(f"[Retry-Fail] {bvid} 重试仍然失败: {result.get('reason', '')}")
+
+    async def fetch_dynamics_in_range(self, start_ts: int, end_ts: int) -> List[Dict]:
+        """分页获取指定时间段内的动态视频（时间倒序）"""
+        videos: List[Dict] = []
+        offset = ""
+        max_pages = 500  # 安全上限，防止无限循环
+
+        for _ in range(max_pages):
+            def _fetch():
+                params = {"type": "all", "timezone_offset": -480}
+                if offset:
+                    params["offset"] = offset
+                data = self.web.request(
+                    "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all",
+                    referer="https://t.bilibili.com",
+                    params=params,
+                    timeout=15,
+                )
+                return data
+
+            data = await asyncio.to_thread(_fetch)
+            if data.get("code") != 0:
+                raise RuntimeError(f"获取动态失败: {data}")
+
+            items = data["data"].get("items", [])
+            if not items:
+                break
+
+            has_more = data["data"].get("has_more", False)
+            offset = data["data"].get("offset", "")
+
+            stop_paging = False
+            for item in items:
+                pub_ts = (
+                    item.get("modules", {})
+                    .get("module_author", {})
+                    .get("pub_ts", 0)
+                )
+                try:
+                    pub_ts = int(pub_ts)
+                    # B站动态API的pub_ts是毫秒时间戳，转换为秒
+                    if pub_ts > 10000000000:
+                        pub_ts = pub_ts // 1000
+                except (ValueError, TypeError):
+                    pub_ts = 0
+                # 时间倒序：如果已经早于开始时间，后续也不用再看了
+                if pub_ts and pub_ts < start_ts:
+                    stop_paging = True
+                    break
+                if pub_ts and pub_ts > end_ts:
+                    continue
+
+                video = self._extract_video_from_dynamic(item)
+                if video:
+                    video["pub_ts"] = pub_ts
+                    video["type"] = "动态"
+                    videos.append(video)
+
+            if stop_paging or not has_more or not offset:
+                break
+
+        return videos
+
+    async def fetch_user_videos_in_range(self, mid: int, start_ts: int, end_ts: int) -> List[Dict]:
+        """分页获取指定UP主在时间段内的投稿（按发布日期倒序）"""
+        videos: List[Dict] = []
+        pn = 1
+        ps = 30
+        max_pages = 500
+
+        for _ in range(max_pages):
+            params = {
+                "mid": mid,
+                "ps": ps,
+                "pn": pn,
+                "order": "pubdate",
+            }
+            signed = self.wbi.sign(params)
+            data = await asyncio.to_thread(
+                self.web.request,
+                "https://api.bilibili.com/x/space/wbi/arc/search",
+                referer=f"https://space.bilibili.com/{mid}",
+                params=signed,
+                timeout=15,
+            )
+
+            if data.get("code") != 0:
+                raise RuntimeError(f"获取UP主投稿失败: {data}")
+
+            vlist = data["data"].get("list", {}).get("vlist", [])
+            if not vlist:
+                break
+
+            for v in vlist:
+                created = v.get("created", 0)
+                try:
+                    created = int(created)
+                except (ValueError, TypeError):
+                    created = 0
+                if created < start_ts:
+                    return videos
+                if created > end_ts:
+                    continue
+                videos.append({
+                    "bvid": v["bvid"],
+                    "title": v["title"],
+                    "uname": v.get("author", ""),
+                    "mid": v.get("mid", mid),
+                    "pub_ts": created,
+                    "type": "投稿",
+                })
+
+            page_info = data["data"].get("page", {})
+            total = page_info.get("count", 0)
+            if pn * ps >= total:
+                break
+            pn += 1
+
+        return videos
 
     def start(self):
         interval = self.config["monitor"]["interval"]
@@ -184,5 +344,8 @@ class BilibiliMonitor:
         logger.info(f"[Monitor] 调度器已启动，每 {interval} 秒扫描一次")
 
     def stop(self):
-        self.scheduler.shutdown(wait=False)
-        logger.info("[Monitor] 调度器已停止")
+        try:
+            self.scheduler.shutdown(wait=False)
+            logger.info("[Monitor] 调度器已停止")
+        except Exception:
+            pass

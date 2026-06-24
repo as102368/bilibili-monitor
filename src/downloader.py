@@ -68,23 +68,29 @@ class Downloader:
 
     # 画质代码映射（qn -> 最高允许 id）
     QUALITY_MAP = {
-        "4K": 125,
-        "1080P60": 120,
-        "1080P+": 116,
-        "1080P": 112,
-        "720P": 80,
+        "8K": 127,
+        "4K": 120,
+        "1080P60": 116,
+        "1080P+": 112,
+        "1080P": 80,
+        "720P60": 74,
+        "720P": 64,
         "480P": 32,
         "360P": 16,
-        "best": 125,
+        "best": 127,
     }
 
-    # 实际流 id -> B站画质名称
+    # 实际流 id -> B站画质名称（兜底用，优先按分辨率判断）
     QN_LABEL_MAP = {
-        125: "4K 超高清",
-        120: "1080P 高码率",
-        116: "1080P 高清",
-        112: "1080P 高清",
-        80: "720P 准高清",
+        127: "8K 超高清",
+        126: "杜比视界",
+        125: "HDR 真彩",
+        120: "4K 超高清",
+        116: "1080P 高帧率",
+        112: "1080P 高码率",
+        80: "1080P 高清",
+        74: "720P 高帧率",
+        64: "720P 高清",
         32: "480P 标清",
         16: "360P 流畅",
     }
@@ -98,6 +104,8 @@ class Downloader:
         video_stream: VideoStream,
         ctfile_uploader: Optional[CtfileUploader] = None,
         db: Optional[DownloadDB] = None,
+        time_format: str = "yyyy-MM-dd HH-mm-ss",
+        index_format: str = "自然数",
     ):
         self.output_dir = output_dir
         self.quality = quality
@@ -106,6 +114,8 @@ class Downloader:
         self.video_stream = video_stream
         self.ctfile_uploader = ctfile_uploader
         self.db = db
+        self.time_format = time_format
+        self.index_format = index_format
         self.ffmpeg_path = _get_ffmpeg_path()
         self.aria2c_path = _get_aria2c_path()
         self.use_aria2 = _aria2c_available(self.aria2c_path)
@@ -115,31 +125,63 @@ class Downloader:
             logger.warning("[Downloader] 未检测到 Aria2，将回退到 requests 下载")
         os.makedirs(output_dir, exist_ok=True)
 
+    def _get_quality_label(self, stream: dict) -> str:
+        """按 B 站画质 ID 返回官方画质名称"""
+        sid = stream.get("id", 0) or 0
+        return self.QN_LABEL_MAP.get(sid, f"{sid}P")
+
     def _sanitize_filename(self, name: str) -> str:
         """去除文件名中的非法字符"""
         return re.sub(r'[\\/:*?"<>|]', "", name)
 
-    def _build_filename(self, title: str, uploader: str, bvid: str, pubdate: str = "", quality: str = "") -> str:
+    def _build_filename(self, info: dict, quality: str = "", index: int = 1) -> str:
         """根据模板构建文件名，支持 yt-dlp 风格的 %(placeholder)s 格式"""
-        # 将 yt-dlp 风格 %(name)s 转换为 Python format 风格 {name}
-        template = self.template
+        owner = info.get("owner", {})
+        pages = info.get("pages", [])
+        part_title = pages[0].get("part", "") if pages else ""
+
+        pubdate_ts = info.get("pubdate")
+        pubdate_str = ""
+        if pubdate_ts:
+            from datetime import datetime
+            fmt_map = {
+                "yyyy-MM-dd": "%Y-%m-%d",
+                "yyyy-MM-dd HH-mm-ss": "%Y-%m-%d-%H-%M-%S",
+                "yyyyMMdd": "%Y%m%d",
+                "yyyy/MM/dd": "%Y/%m/%d",
+            }
+            dt_fmt = fmt_map.get(self.time_format, "%Y-%m-%d-%H-%M-%S")
+            pubdate_str = datetime.fromtimestamp(pubdate_ts).strftime(dt_fmt)
+
+        if self.index_format == "两位数字":
+            index_str = f"{index:02d}"
+        elif self.index_format == "三位数字":
+            index_str = f"{index:03d}"
+        else:
+            index_str = str(index)
+
         mapping = {
-            "%(uploader)s": "{uploader}",
-            "%(title)s": "{title}",
-            "%(id)s": "{bvid}",
+            "%(uploader)s": self._sanitize_filename(owner.get("name", "")),
+            "%(title)s": self._sanitize_filename(info.get("title", "")),
+            "%(id)s": info.get("bvid", ""),
+            "%(bvid)s": info.get("bvid", ""),
+            "%(avid)s": str(info.get("aid", "")),
+            "%(cid)s": str(info.get("cid", "")),
+            "%(uploader_id)s": str(owner.get("mid", "")),
+            "%(category)s": info.get("tname", ""),
+            "%(part_title)s": self._sanitize_filename(part_title),
+            "%(upload_date)s": pubdate_str,
+            "%(quality)s": quality,
             "%(ext)s": "mp4",
-            "%(upload_date)s": "{pubdate}",
-            "%(quality)s": "{quality}",
+            "%(index)s": index_str,
+            "%(section)s": "",
+            "%(audio_quality)s": "",
+            "%(video_codec)s": "",
         }
+
+        filename = self.template
         for old, new in mapping.items():
-            template = template.replace(old, new)
-        filename = template.format(
-            title=self._sanitize_filename(title),
-            uploader=self._sanitize_filename(uploader),
-            bvid=bvid,
-            pubdate=pubdate,
-            quality=quality,
-        )
+            filename = filename.replace(old, new)
         return filename
 
     def _download_file(self, url: str, output_path: str, referer: str) -> bool:
@@ -287,45 +329,93 @@ class Downloader:
         info = self.video_stream.get_video_info(bvid)
         if not info:
             logger.error(f"[Download] 无法获取视频详情: {bvid}")
-            self._record_failure(bvid, title, uname, "无法获取视频详情（可能被风控或视频已删除）")
-            return {"success": False, "quality": ""}
+            error_info = self.video_stream.last_video_info_error
+            if error_info:
+                code = error_info.get("code")
+                if code == -404:
+                    reason = "视频不存在或已删除"
+                elif code == 62002:
+                    reason = "视频已被UP主隐藏"
+                elif code == 62004:
+                    reason = "视频正在审核中"
+                elif code == 62012:
+                    reason = "视频仅UP主自己可见"
+                elif code in (-412, 412):
+                    reason = "被风控拦截（412）"
+                else:
+                    reason = f"无法获取视频详情（code={code}）"
+            else:
+                reason = "无法获取视频详情（网络异常或无响应）"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         cid = info.get("cid")
         if not cid:
             logger.error(f"[Download] 无法获取 cid: {bvid}")
-            self._record_failure(bvid, title, uname, "无法获取视频 cid")
-            return {"success": False, "quality": ""}
+            reason = "无法获取视频 cid"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
+
+        # 检查视频属性：充电专属、付费等
+        is_upower_exclusive = info.get("is_upower_exclusive", False)
+        rights = info.get("rights", {})
+        is_ugc_pay = bool(rights.get("ugc_pay"))
+        is_pay = bool(rights.get("pay"))
+        is_arc_pay = bool(rights.get("arc_pay"))
 
         # 2. 获取 playurl
         target_qn = self.QUALITY_MAP.get(self.quality, 125)
         playurl = self.video_stream.get_playurl(bvid, cid, qn=target_qn)
         if not playurl:
             logger.error(f"[Download] 无法获取 playurl: {bvid}")
-            self._record_failure(bvid, title, uname, "无法获取播放地址（可能被风控拦截 412）")
-            return {"success": False, "quality": ""}
+            error_info = self.video_stream.last_playurl_error
+            if error_info:
+                code = error_info.get("code")
+                message = error_info.get("message", "")
+                if code in (10001003, 10001004):
+                    reason = "充电专属视频，当前账号未开通包月充电"
+                elif code == -404:
+                    reason = "视频不存在或已删除"
+                elif code in (-412, 412):
+                    reason = "被风控拦截（412）"
+                elif code == -403:
+                    reason = "权限不足（可能需大会员或充电）"
+                elif is_upower_exclusive or is_arc_pay:
+                    reason = "充电专属视频，当前账号未开通包月充电"
+                elif is_ugc_pay or is_pay:
+                    reason = "付费视频，当前账号未购买"
+                else:
+                    reason = f"无法获取播放地址（code={code}, message={message}）"
+            else:
+                reason = "无法获取播放地址（网络异常或无响应）"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         # 3. 解析 DASH 直链
         dash = playurl.get("dash")
         if not dash:
             logger.error(f"[Download] 视频不支持 DASH 格式: {bvid}")
-            self._record_failure(bvid, title, uname, "视频不支持 DASH 格式")
-            return {"success": False, "quality": ""}
+            reason = "充电专属视频，当前账号未开通包月充电"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         video_streams = dash.get("video", [])
         audio_streams = dash.get("audio", [])
 
         if not video_streams:
             logger.error(f"[Download] 无可用视频流: {bvid}")
-            self._record_failure(bvid, title, uname, "无可用视频流")
-            return {"success": False, "quality": ""}
+            reason = "无可用视频流"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         video_stream = self.video_stream.select_best_stream(video_streams, target_qn)
         audio_stream = self.video_stream.select_best_stream(audio_streams, 9999) if audio_streams else None
 
         if not video_stream:
             logger.error(f"[Download] 无法选择合适的视频流: {bvid}")
-            self._record_failure(bvid, title, uname, "无法选择合适的视频流（可能画质不可用）")
-            return {"success": False, "quality": ""}
+            reason = "无法选择合适的视频流（可能画质不可用）"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         video_url = video_stream.get("base_url")
         if not video_url:
@@ -342,18 +432,13 @@ class Downloader:
 
         if not video_url:
             logger.error(f"[Download] 无可用下载链接: {bvid}")
-            self._record_failure(bvid, title, uname, "无可用下载链接")
-            return {"success": False, "quality": ""}
+            reason = "无可用下载链接"
+            self._record_failure(bvid, title, uname, reason)
+            return {"success": False, "quality": "", "reason": reason}
 
         # 4. 构建输出文件名
-        pubdate_ts = info.get("pubdate")
-        pubdate_str = ""
-        if pubdate_ts:
-            from datetime import datetime
-            pubdate_str = datetime.fromtimestamp(pubdate_ts).strftime("%Y-%m-%d-%H-%M-%S")
-        actual_qn = video_stream.get("id", 0)
-        quality_str = self.QN_LABEL_MAP.get(actual_qn, f"{actual_qn}P")
-        output_name = self._build_filename(title, uname, bvid, pubdate_str, quality_str)
+        quality_str = self._get_quality_label(video_stream)
+        output_name = self._build_filename(info, quality_str)
         # 如果没有扩展名，加上 .mp4
         if not output_name.lower().endswith(".mp4"):
             output_name += ".mp4"
@@ -370,26 +455,29 @@ class Downloader:
             ok1 = self._download_file(video_url, video_tmp, referer)
             ok2 = self._download_file(audio_url, audio_tmp, referer)
             if not (ok1 and ok2):
-                self._record_failure(bvid, title, uname, "音视频流下载失败（网络异常或被拦截）")
-                return {"success": False, "quality": quality_str}
+                reason = "音视频流下载失败（网络异常或被拦截）"
+                self._record_failure(bvid, title, uname, reason)
+                return {"success": False, "quality": quality_str, "reason": reason}
 
             success = self._merge_with_ffmpeg(video_tmp, audio_tmp, output_path)
             if not success:
-                self._record_failure(bvid, title, uname, "FFmpeg 音视频合成失败")
-                return {"success": False, "quality": quality_str}
+                reason = "FFmpeg 音视频合成失败"
+                self._record_failure(bvid, title, uname, reason)
+                return {"success": False, "quality": quality_str, "reason": reason}
         else:
             # 无音频分离，直接下载视频（MP4 直链）
             success = self._download_file(video_url, output_path, referer)
             if not success:
-                self._record_failure(bvid, title, uname, "视频下载失败（网络异常或被拦截）")
-                return {"success": False, "quality": quality_str}
+                reason = "视频下载失败（网络异常或被拦截）"
+                self._record_failure(bvid, title, uname, reason)
+                return {"success": False, "quality": quality_str, "reason": reason}
 
         # 上传至城通网盘并删除源文件
         if success and self.ctfile_uploader:
+            import os as _os
+            file_size = _os.path.getsize(output_path) if _os.path.exists(output_path) else 0
             upload_ok = self.ctfile_uploader.upload_and_delete(output_path)
             if self.db:
-                import os as _os
-                file_size = _os.path.getsize(output_path) if _os.path.exists(output_path) else 0
                 status = "success" if upload_ok else "failed"
                 message = "上传并删除本地文件成功" if upload_ok else "上传失败或校验未通过，保留本地文件"
                 self.db.add_upload_record(
@@ -402,7 +490,8 @@ class Downloader:
                     message=message,
                 )
             if not upload_ok:
-                self._record_failure(bvid, title, uname, "城通网盘上传失败（上传接口异常或校验未通过）")
-                return {"success": False, "quality": quality_str}
+                reason = "城通网盘上传失败（上传接口异常或校验未通过）"
+                self._record_failure(bvid, title, uname, reason)
+                return {"success": False, "quality": quality_str, "reason": reason}
 
         return {"success": True, "quality": quality_str}

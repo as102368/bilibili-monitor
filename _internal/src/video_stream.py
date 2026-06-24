@@ -16,6 +16,8 @@ class VideoStream:
     def __init__(self, web_client: BilibiliWebClient, wbi: WBI):
         self.web = web_client
         self.wbi = wbi
+        self.last_playurl_error: Optional[Dict[str, Any]] = None
+        self.last_video_info_error: Optional[Dict[str, Any]] = None
 
     def get_playurl(self, bvid: str, cid: int, qn: int = 125) -> Optional[Dict[str, Any]]:
         """
@@ -29,7 +31,12 @@ class VideoStream:
             "fourk": 1,
             "fnver": 0,
             "fnval": 4048,  # 请求 DASH 格式
+            "platform": "web",
         }
+        # 8K 需要额外参数
+        if qn >= 127:
+            params["qn"] = 127
+            params["eightk"] = 1
         signed = self.wbi.sign(params)
         data = self.web.request(
             "https://api.bilibili.com/x/player/wbi/playurl",
@@ -39,7 +46,9 @@ class VideoStream:
         )
         if data.get("code") != 0:
             logger.warning(f"[VideoStream] 获取 playurl 失败: {data}")
+            self.last_playurl_error = {"code": data.get("code"), "message": data.get("message", "")}
             return None
+        self.last_playurl_error = None
         return data.get("data")
 
     def get_video_info(self, bvid: str) -> Optional[Dict[str, Any]]:
@@ -57,7 +66,9 @@ class VideoStream:
         )
         if data.get("code") != 0:
             logger.warning(f"[VideoStream] 获取视频详情失败: {data}")
+            self.last_video_info_error = {"code": data.get("code"), "message": data.get("message", "")}
             return None
+        self.last_video_info_error = None
         return data.get("data")
 
     @staticmethod
