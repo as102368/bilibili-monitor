@@ -60,7 +60,13 @@ class BilibiliMonitor:
         download_dir = config["download"].get("output_dir", "./downloads")
         self.upload_manager = UploadManager(download_dir, config["database"]["path"], ctfile_uploader)
 
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler = AsyncIOScheduler(
+            job_defaults={
+                "misfire_grace_time": None,
+                "coalesce": True,
+                "max_instances": 1,
+            }
+        )
         concurrent = max(1, min(5, config["download"].get("concurrent_downloads", 2)))
         self._download_sem = asyncio.Semaphore(concurrent)
         self.my_mid: int = 0
@@ -151,6 +157,12 @@ class BilibiliMonitor:
 
     async def check_all(self):
         try:
+            await self._do_check_all()
+        except Exception:
+            logger.exception("[Monitor] check_all 发生未捕获异常，调度器将继续运行")
+
+    async def _do_check_all(self):
+        try:
             items = await self._fetch_dynamic_videos()
         except Exception as e:
             logger.error(f"[Monitor] 获取动态失败: {e}")
@@ -200,7 +212,14 @@ class BilibiliMonitor:
 
             logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
             delay = idx * random.uniform(4, 6)
-            asyncio.create_task(self._download_and_track(bvid, title, uname, mid, delay))
+            task = asyncio.create_task(self._download_and_track(bvid, title, uname, mid, delay))
+            task.add_done_callback(self._on_download_task_done)
+
+    def _on_download_task_done(self, task: asyncio.Task):
+        try:
+            task.result()
+        except Exception:
+            logger.exception("[Monitor] 后台下载任务异常")
 
     async def fetch_dynamics_in_range(self, start_ts: int, end_ts: int) -> List[Dict]:
         """分页获取指定时间段内的动态视频（时间倒序）"""
@@ -322,17 +341,21 @@ class BilibiliMonitor:
         return videos
 
     def start(self):
-        interval = self.config["monitor"]["interval"]
-        self.scheduler.add_job(
-            self.check_all,
-            "interval",
-            seconds=interval,
-            id="check_all",
-            replace_existing=True,
-            next_run_time=datetime.now(),
-        )
-        self.scheduler.start()
-        logger.info(f"[Monitor] 调度器已启动，每 {interval} 秒扫描一次")
+        try:
+            interval = self.config["monitor"]["interval"]
+            self.scheduler.add_job(
+                self.check_all,
+                "interval",
+                seconds=interval,
+                id="check_all",
+                replace_existing=True,
+                next_run_time=datetime.now(),
+            )
+            self.scheduler.start()
+            logger.info(f"[Monitor] 调度器已启动，每 {interval} 秒扫描一次")
+        except Exception:
+            logger.exception("[Monitor] 启动调度器失败")
+            raise
 
     def stop(self):
         try:

@@ -31,6 +31,7 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from ..logger import get_logger
 from ..wbi import WBI
+from ..database import DownloadDB
 
 logger = get_logger(__name__)
 
@@ -43,21 +44,42 @@ def _ts_to_str(ts: int) -> str:
         return ""
 
 
+def _get_video_status(db: DownloadDB, bvid: str) -> str:
+    """返回视频在本地数据库中的状态：已存档 / 失败原因 / 空"""
+    if not bvid:
+        return ""
+    if db.is_downloaded(bvid):
+        return "已存档"
+    failure = db.get_failure_by_bvid(bvid)
+    if failure:
+        reason = failure.get("reason", "")
+        if "充电专属" in reason:
+            return "充电专属"
+        if "付费" in reason:
+            return "付费视频"
+        if "不存在" in reason or "已删除" in reason:
+            return "已失效"
+        return reason or "下载失败"
+    return ""
+
+
 class UserCenterDialog(QWidget):
     """用户中心页面（嵌入主窗口使用）"""
 
-    def __init__(self, web_client, download_callback: Callable[[List[Dict]], None], parent=None):
+    def __init__(self, web_client, db_path: str, download_callback: Callable[[List[Dict]], None], parent=None):
         super().__init__(parent)
         self.setMinimumSize(1000, 700)
         self.web = web_client
+        self.db_path = db_path
+        self.db = DownloadDB(db_path)
         self.download_callback = download_callback
         self.user_info: Dict = {}
         self.current_videos: List[Dict] = []
+        self.user_mid: int = 0
 
         self._build_ui()
         # 延迟加载数据，避免在创建/切换页面时阻塞主线程
         QTimer.singleShot(0, self._load_user_info)
-        QTimer.singleShot(0, self._load_followings)
 
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
@@ -135,13 +157,15 @@ class UserCenterDialog(QWidget):
         layout.addLayout(top)
 
         self.follow_table = QTableWidget()
-        self.follow_table.setColumnCount(5)
-        self.follow_table.setHorizontalHeaderLabels(["", "UID", "昵称", "签名", "操作"])
+        self.follow_table.setColumnCount(4)
+        self.follow_table.setHorizontalHeaderLabels(["", "昵称", "签名", "操作"])
         self.follow_table.setColumnWidth(0, 30)
-        self.follow_table.setColumnWidth(1, 100)
-        self.follow_table.setColumnWidth(2, 160)
-        self.follow_table.setColumnWidth(3, 300)
-        self.follow_table.setColumnWidth(4, 80)
+        self.follow_table.setColumnWidth(1, 160)
+        self.follow_table.setColumnWidth(2, 360)
+        self.follow_table.setColumnWidth(3, 80)
+        self.follow_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.follow_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.follow_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.follow_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.follow_table)
 
@@ -175,13 +199,15 @@ class UserCenterDialog(QWidget):
         layout.addWidget(self.group_list, 1)
 
         self.group_member_table = QTableWidget()
-        self.group_member_table.setColumnCount(5)
-        self.group_member_table.setHorizontalHeaderLabels(["", "UID", "昵称", "签名", "操作"])
+        self.group_member_table.setColumnCount(4)
+        self.group_member_table.setHorizontalHeaderLabels(["", "昵称", "签名", "操作"])
         self.group_member_table.setColumnWidth(0, 30)
-        self.group_member_table.setColumnWidth(1, 100)
-        self.group_member_table.setColumnWidth(2, 160)
-        self.group_member_table.setColumnWidth(3, 300)
-        self.group_member_table.setColumnWidth(4, 80)
+        self.group_member_table.setColumnWidth(1, 160)
+        self.group_member_table.setColumnWidth(2, 360)
+        self.group_member_table.setColumnWidth(3, 80)
+        self.group_member_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.group_member_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.group_member_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.group_member_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.group_member_table, 2)
 
@@ -215,14 +241,18 @@ class UserCenterDialog(QWidget):
         layout.addWidget(self.fav_list, 1)
 
         self.fav_video_table = QTableWidget()
-        self.fav_video_table.setColumnCount(6)
-        self.fav_video_table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "操作"])
+        self.fav_video_table.setColumnCount(7)
+        self.fav_video_table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
         self.fav_video_table.setColumnWidth(0, 30)
         self.fav_video_table.setColumnWidth(1, 100)
-        self.fav_video_table.setColumnWidth(2, 300)
+        self.fav_video_table.setColumnWidth(2, 240)
         self.fav_video_table.setColumnWidth(3, 120)
         self.fav_video_table.setColumnWidth(4, 150)
-        self.fav_video_table.setColumnWidth(5, 80)
+        self.fav_video_table.setColumnWidth(5, 100)
+        self.fav_video_table.setColumnWidth(6, 80)
+        self.fav_video_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.fav_video_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.fav_video_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.fav_video_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.fav_video_table, 2)
 
@@ -253,16 +283,20 @@ class UserCenterDialog(QWidget):
         layout.addLayout(top)
 
         table = QTableWidget()
-        table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "时间", "操作"])
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "时间", "状态", "操作"])
         table.setColumnWidth(0, 30)
         table.setColumnWidth(1, 100)
-        table.setColumnWidth(2, 320)
+        table.setColumnWidth(2, 260)
         table.setColumnWidth(3, 120)
         table.setColumnWidth(4, 150)
-        table.setColumnWidth(5, 80)
+        table.setColumnWidth(5, 100)
+        table.setColumnWidth(6, 80)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.ExtendedSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(table)
+        layout.addWidget(table, 2)
 
         btn_layout = QHBoxLayout()
         select_all = QCheckBox("全选")
@@ -297,6 +331,9 @@ class UserCenterDialog(QWidget):
         self.sub_table.setColumnWidth(2, 300)
         self.sub_table.setColumnWidth(3, 100)
         self.sub_table.setColumnWidth(4, 80)
+        self.sub_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.sub_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.sub_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.sub_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.sub_table)
 
@@ -324,21 +361,25 @@ class UserCenterDialog(QWidget):
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
 
     def _get_table_selected_rows(self, table: QTableWidget) -> List[int]:
-        result = []
+        selected_rows = set()
+        # 复选框选中
         for row in range(table.rowCount()):
             item = table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                result.append(row)
-        return result
+                selected_rows.add(row)
+        # 行拖拽框选
+        for item in table.selectedItems():
+            selected_rows.add(item.row())
+        return sorted(selected_rows)
 
     def _open_up_videos(self, mid: int, uname: str):
         """打开 UP 主视频列表弹窗"""
-        dialog = UpVideoDialog(self.web, mid, uname, self.download_callback, self)
+        dialog = UpVideoDialog(self.web, mid, uname, self.db_path, self.download_callback, self)
         dialog.exec()
 
     def _open_fav_videos(self, media_id: int, title: str):
         """打开收藏夹视频列表弹窗"""
-        dialog = FavVideoDialog(self.web, media_id, title, self.download_callback, self)
+        dialog = FavVideoDialog(self.web, media_id, title, self.db_path, self.download_callback, self)
         dialog.exec()
 
     # ---------- 数据加载 ----------
@@ -352,6 +393,7 @@ class UserCenterDialog(QWidget):
             if data.get("code") == 0:
                 info = data["data"]
                 self.user_info = info
+                self.user_mid = info.get("mid", 0)
                 self.uname_label.setText(info.get("uname", "未登录"))
                 face_url = info.get("face", "")
                 if face_url:
@@ -364,24 +406,28 @@ class UserCenterDialog(QWidget):
                             64, 64, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
                         )
                         self.avatar_label.setPixmap(scaled)
+                # 获取到用户信息后再加载关注列表，确保 mid 已就绪
+                self._load_followings()
         except Exception as e:
             logger.warning(f"[UserCenter] 获取用户信息失败: {e}")
 
     def _load_followings(self):
         self.follow_table.setRowCount(0)
         try:
-            followings = fetch_followings(self.web)
+            vmid = self.user_mid or int(self.web.dedeuserid or 0)
+            followings = fetch_followings(self.web, vmid=vmid)
             self.follow_table.setRowCount(len(followings))
             for i, f in enumerate(followings):
                 self._set_checkable_item(self.follow_table, i, 0)
-                self.follow_table.setItem(i, 1, QTableWidgetItem(str(f.get("mid", ""))))
-                self.follow_table.setItem(i, 2, QTableWidgetItem(f.get("uname", "")))
-                self.follow_table.setItem(i, 3, QTableWidgetItem(f.get("sign", "")))
-                btn = QPushButton("查看")
                 mid = f.get("mid", 0)
                 uname = f.get("uname", "")
+                self.follow_table.setItem(i, 1, QTableWidgetItem(uname))
+                self.follow_table.setItem(i, 2, QTableWidgetItem(f.get("sign", "")))
+                # 将 mid 存入行数据，避免展示 UID
+                self.follow_table.item(i, 1).setData(Qt.UserRole, mid)
+                btn = QPushButton("查看")
                 btn.clicked.connect(lambda _, m=mid, u=uname: self._open_up_videos(m, u))
-                self.follow_table.setCellWidget(i, 4, btn)
+                self.follow_table.setCellWidget(i, 3, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取关注列表失败: {e}")
 
@@ -404,21 +450,22 @@ class UserCenterDialog(QWidget):
             self.group_member_table.setRowCount(len(members))
             for i, f in enumerate(members):
                 self._set_checkable_item(self.group_member_table, i, 0)
-                self.group_member_table.setItem(i, 1, QTableWidgetItem(str(f.get("mid", ""))))
-                self.group_member_table.setItem(i, 2, QTableWidgetItem(f.get("uname", "")))
-                self.group_member_table.setItem(i, 3, QTableWidgetItem(f.get("sign", "")))
-                btn = QPushButton("查看")
                 mid = f.get("mid", 0)
                 uname = f.get("uname", "")
+                self.group_member_table.setItem(i, 1, QTableWidgetItem(uname))
+                self.group_member_table.setItem(i, 2, QTableWidgetItem(f.get("sign", "")))
+                self.group_member_table.item(i, 1).setData(Qt.UserRole, mid)
+                btn = QPushButton("查看")
                 btn.clicked.connect(lambda _, m=mid, u=uname: self._open_up_videos(m, u))
-                self.group_member_table.setCellWidget(i, 4, btn)
+                self.group_member_table.setCellWidget(i, 3, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取分组成员失败: {e}")
 
     def _load_fav_folders(self):
         self.fav_list.clear()
         try:
-            folders = fetch_fav_folders(self.web)
+            up_mid = self.user_mid or int(self.web.dedeuserid or 0)
+            folders = fetch_fav_folders(self.web, up_mid=up_mid)
             for f in folders:
                 item = QListWidgetItem(f"{f.get('title', '')} ({f.get('media_count', 0)})")
                 item.setData(Qt.UserRole, f.get("id", 0))
@@ -450,16 +497,17 @@ class UserCenterDialog(QWidget):
         table.setRowCount(len(videos))
         for i, v in enumerate(videos):
             self._set_checkable_item(table, i, 0)
-            table.setItem(i, 1, QTableWidgetItem(v.get("bvid", "")))
+            bvid = v.get("bvid", "")
+            table.setItem(i, 1, QTableWidgetItem(bvid))
             table.setItem(i, 2, QTableWidgetItem(v.get("title", "")))
             table.setItem(i, 3, QTableWidgetItem(v.get("uname", "")))
             table.setItem(i, 4, QTableWidgetItem(_ts_to_str(v.get("ctime", 0))))
+            table.setItem(i, 5, QTableWidgetItem(_get_video_status(self.db, bvid)))
             btn = QPushButton("下载")
-            bvid = v.get("bvid", "")
             title = v.get("title", "")
             uname = v.get("uname", "")
             btn.clicked.connect(lambda _, b=bvid, t=title, u=uname: self._download_one(b, t, u))
-            table.setCellWidget(i, 5, btn)
+            table.setCellWidget(i, 6, btn)
 
     def _load_subscriptions(self):
         self.sub_table.setRowCount(0)
@@ -517,13 +565,13 @@ class UserCenterDialog(QWidget):
             return
         up_list = []
         for row in rows:
-            mid = int(self.follow_table.item(row, 1).text() or 0)
-            uname = self.follow_table.item(row, 2).text() or ""
+            mid = int(self.follow_table.item(row, 1).data(Qt.UserRole) or 0)
+            uname = self.follow_table.item(row, 1).text() or ""
             if mid:
                 up_list.append({"mid": mid, "uname": uname})
         if not up_list:
             return
-        dialog = MultiUpDownloadDialog(self.web, up_list, self.download_callback, self)
+        dialog = MultiUpDownloadDialog(self.web, up_list, self.db_path, self.download_callback, self)
         dialog.exec()
 
     def _on_download_selected_group_members(self):
@@ -533,13 +581,13 @@ class UserCenterDialog(QWidget):
             return
         up_list = []
         for row in rows:
-            mid = int(self.group_member_table.item(row, 1).text() or 0)
-            uname = self.group_member_table.item(row, 2).text() or ""
+            mid = int(self.group_member_table.item(row, 1).data(Qt.UserRole) or 0)
+            uname = self.group_member_table.item(row, 1).text() or ""
             if mid:
                 up_list.append({"mid": mid, "uname": uname})
         if not up_list:
             return
-        dialog = MultiUpDownloadDialog(self.web, up_list, self.download_callback, self)
+        dialog = MultiUpDownloadDialog(self.web, up_list, self.db_path, self.download_callback, self)
         dialog.exec()
 
     def _on_download_selected_fav_videos(self):
@@ -585,13 +633,15 @@ class UserCenterDialog(QWidget):
 class UpVideoDialog(QDialog):
     """UP 主视频列表弹窗"""
 
-    def __init__(self, web_client, mid: int, uname: str, download_callback: Callable, parent=None):
+    def __init__(self, web_client, mid: int, uname: str, db_path: str, download_callback: Callable, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{uname} 的视频列表")
         self.setMinimumSize(900, 600)
         self.web = web_client
         self.mid = mid
         self.uname = uname
+        self.db_path = db_path
+        self.db = DownloadDB(db_path)
         self.download_callback = download_callback
         self.videos: List[Dict] = []
         self.wbi = WBI(web_client.sessdata)
@@ -612,14 +662,18 @@ class UpVideoDialog(QDialog):
         layout.addLayout(top)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "发布时间", "时长", "操作"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "发布时间", "时长", "状态", "操作"])
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 380)
+        self.table.setColumnWidth(2, 320)
         self.table.setColumnWidth(3, 150)
         self.table.setColumnWidth(4, 80)
-        self.table.setColumnWidth(5, 80)
+        self.table.setColumnWidth(5, 100)
+        self.table.setColumnWidth(6, 80)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
@@ -649,15 +703,16 @@ class UpVideoDialog(QDialog):
                 item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 item.setCheckState(Qt.Unchecked)
                 self.table.setItem(i, 0, item)
-                self.table.setItem(i, 1, QTableWidgetItem(v.get("bvid", "")))
+                bvid = v.get("bvid", "")
+                self.table.setItem(i, 1, QTableWidgetItem(bvid))
                 self.table.setItem(i, 2, QTableWidgetItem(v.get("title", "")))
                 self.table.setItem(i, 3, QTableWidgetItem(_ts_to_str(v.get("created", 0))))
                 self.table.setItem(i, 4, QTableWidgetItem(self._format_duration(v.get("length", 0))))
+                self.table.setItem(i, 5, QTableWidgetItem(_get_video_status(self.db, bvid)))
                 btn = QPushButton("下载")
-                bvid = v.get("bvid", "")
                 title = v.get("title", "")
                 btn.clicked.connect(lambda _, b=bvid, t=title: self._download_one(b, t))
-                self.table.setCellWidget(i, 5, btn)
+                self.table.setCellWidget(i, 6, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取视频列表失败: {e}")
 
@@ -676,14 +731,20 @@ class UpVideoDialog(QDialog):
         self.download_callback([{"bvid": bvid, "title": title, "uname": self.uname}])
 
     def _on_download_selected(self):
-        videos = []
+        selected_rows = set()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                bvid = self.table.item(row, 1).text() or ""
-                title = self.table.item(row, 2).text() or ""
-                if bvid:
-                    videos.append({"bvid": bvid, "title": title, "uname": self.uname})
+                selected_rows.add(row)
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        videos = []
+        for row in sorted(selected_rows):
+            bvid = self.table.item(row, 1).text() or ""
+            title = self.table.item(row, 2).text() or ""
+            if bvid:
+                videos.append({"bvid": bvid, "title": title, "uname": self.uname})
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
@@ -693,12 +754,14 @@ class UpVideoDialog(QDialog):
 class FavVideoDialog(QDialog):
     """收藏夹视频列表弹窗"""
 
-    def __init__(self, web_client, media_id: int, title: str, download_callback: Callable, parent=None):
+    def __init__(self, web_client, media_id: int, title: str, db_path: str, download_callback: Callable, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"收藏夹: {title}")
         self.setMinimumSize(900, 600)
         self.web = web_client
         self.media_id = media_id
+        self.db_path = db_path
+        self.db = DownloadDB(db_path)
         self.download_callback = download_callback
         self.videos: List[Dict] = []
 
@@ -718,14 +781,18 @@ class FavVideoDialog(QDialog):
         layout.addLayout(top)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "操作"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 340)
+        self.table.setColumnWidth(2, 280)
         self.table.setColumnWidth(3, 120)
         self.table.setColumnWidth(4, 150)
-        self.table.setColumnWidth(5, 80)
+        self.table.setColumnWidth(5, 100)
+        self.table.setColumnWidth(6, 80)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
@@ -755,16 +822,17 @@ class FavVideoDialog(QDialog):
                 item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 item.setCheckState(Qt.Unchecked)
                 self.table.setItem(i, 0, item)
-                self.table.setItem(i, 1, QTableWidgetItem(v.get("bvid", "")))
+                bvid = v.get("bvid", "")
+                self.table.setItem(i, 1, QTableWidgetItem(bvid))
                 self.table.setItem(i, 2, QTableWidgetItem(v.get("title", "")))
                 self.table.setItem(i, 3, QTableWidgetItem(v.get("uname", "")))
                 self.table.setItem(i, 4, QTableWidgetItem(_ts_to_str(v.get("fav_time", 0))))
+                self.table.setItem(i, 5, QTableWidgetItem(_get_video_status(self.db, bvid)))
                 btn = QPushButton("下载")
-                bvid = v.get("bvid", "")
                 title = v.get("title", "")
                 uname = v.get("uname", "")
                 btn.clicked.connect(lambda _, b=bvid, t=title, u=uname: self._download_one(b, t, u))
-                self.table.setCellWidget(i, 5, btn)
+                self.table.setCellWidget(i, 6, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取收藏夹视频失败: {e}")
 
@@ -772,15 +840,21 @@ class FavVideoDialog(QDialog):
         self.download_callback([{"bvid": bvid, "title": title, "uname": uname}])
 
     def _on_download_selected(self):
-        videos = []
+        selected_rows = set()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                bvid = self.table.item(row, 1).text() or ""
-                title = self.table.item(row, 2).text() or ""
-                uname = self.table.item(row, 3).text() or ""
-                if bvid:
-                    videos.append({"bvid": bvid, "title": title, "uname": uname})
+                selected_rows.add(row)
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        videos = []
+        for row in sorted(selected_rows):
+            bvid = self.table.item(row, 1).text() or ""
+            title = self.table.item(row, 2).text() or ""
+            uname = self.table.item(row, 3).text() or ""
+            if bvid:
+                videos.append({"bvid": bvid, "title": title, "uname": uname})
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
@@ -790,12 +864,14 @@ class FavVideoDialog(QDialog):
 class MultiUpDownloadDialog(QDialog):
     """批量下载多个 UP 主全部视频的确认/进度弹窗"""
 
-    def __init__(self, web_client, up_list: List[Dict], download_callback: Callable, parent=None):
+    def __init__(self, web_client, up_list: List[Dict], db_path: str, download_callback: Callable, parent=None):
         super().__init__(parent)
         self.setWindowTitle("批量下载UP主视频")
         self.setMinimumSize(600, 400)
         self.web = web_client
         self.up_list = up_list
+        self.db_path = db_path
+        self.db = DownloadDB(db_path)
         self.download_callback = download_callback
         self.videos: List[Dict] = []
         self.wbi = WBI(web_client.sessdata)
@@ -816,13 +892,17 @@ class MultiUpDownloadDialog(QDialog):
         self.progress.canceled.connect(self.reject)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "发布时间"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "发布时间", "状态"])
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 380)
+        self.table.setColumnWidth(2, 320)
         self.table.setColumnWidth(3, 120)
         self.table.setColumnWidth(4, 150)
+        self.table.setColumnWidth(5, 100)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
@@ -870,23 +950,31 @@ class MultiUpDownloadDialog(QDialog):
             item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             item.setCheckState(Qt.Unchecked)
             self.table.setItem(i, 0, item)
-            self.table.setItem(i, 1, QTableWidgetItem(v.get("bvid", "")))
+            bvid = v.get("bvid", "")
+            self.table.setItem(i, 1, QTableWidgetItem(bvid))
             self.table.setItem(i, 2, QTableWidgetItem(v.get("title", "")))
             self.table.setItem(i, 3, QTableWidgetItem(v.get("uname", "")))
             self.table.setItem(i, 4, QTableWidgetItem(_ts_to_str(v.get("created", 0))))
+            self.table.setItem(i, 5, QTableWidgetItem(_get_video_status(self.db, bvid)))
 
     def _on_download_selected(self):
         logger.info("[MultiUpDownload] 点击批量下载选中视频")
-        videos = []
+        selected_rows = set()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                bvid = self.table.item(row, 1).text() or ""
-                title = self.table.item(row, 2).text() or ""
-                uname = self.table.item(row, 3).text() or ""
-                if bvid:
-                    videos.append({"bvid": bvid, "title": title, "uname": uname})
-        logger.info(f"[MultiUpDownload] 勾选视频数量: {len(videos)}")
+                selected_rows.add(row)
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        videos = []
+        for row in sorted(selected_rows):
+            bvid = self.table.item(row, 1).text() or ""
+            title = self.table.item(row, 2).text() or ""
+            uname = self.table.item(row, 3).text() or ""
+            if bvid:
+                videos.append({"bvid": bvid, "title": title, "uname": uname})
+        logger.info(f"[MultiUpDownload] 选中视频数量: {len(videos)}")
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
@@ -902,16 +990,19 @@ class MultiUpDownloadDialog(QDialog):
 
 # ---------- B站 API 封装 ----------
 
-def fetch_followings(web) -> List[Dict]:
+def fetch_followings(web, vmid: int = 0) -> List[Dict]:
     """获取我的关注列表（全部）"""
     result = []
     pn = 1
     ps = 50
+    vmid = vmid or int(web.dedeuserid or 0)
+    if not vmid:
+        raise RuntimeError("未获取到用户 mid，无法加载关注列表")
     while True:
         data = web.request(
             "https://api.bilibili.com/x/relation/followings",
             referer="https://space.bilibili.com",
-            params={"vmid": web.dedeuserid or "0", "pn": pn, "ps": ps, "order": "desc"},
+            params={"vmid": vmid, "pn": pn, "ps": ps, "order_type": ""},
         )
         if data.get("code") != 0:
             raise RuntimeError(data.get("message", "获取关注列表失败"))
@@ -978,12 +1069,13 @@ def fetch_group_members(web, tagid: int) -> List[Dict]:
     return result
 
 
-def fetch_fav_folders(web) -> List[Dict]:
+def fetch_fav_folders(web, up_mid: int = 0) -> List[Dict]:
     """获取收藏夹列表"""
+    up_mid = up_mid or int(web.dedeuserid or 0)
     data = web.request(
         "https://api.bilibili.com/x/v3/fav/folder/created/list-all",
         referer="https://space.bilibili.com",
-        params={"up_mid": int(web.dedeuserid or 0)},
+        params={"up_mid": up_mid},
     )
     if data.get("code") != 0:
         raise RuntimeError(data.get("message", "获取收藏夹失败"))

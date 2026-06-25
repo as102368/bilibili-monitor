@@ -22,6 +22,8 @@ a = Analysis(
         'src.wbi',
         'src.ctfile_uploader',
         'src.upload_manager',
+        'src.progress',
+        'src.gui.status_tab',
         'src.config_loader',
         'src.logger',
         'src.gui.log_handler',

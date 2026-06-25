@@ -1,9 +1,12 @@
 import glob
 import os
+import random
 import re
 import subprocess
 import sys
-from typing import Optional
+import threading
+import time
+from typing import Callable, Dict, Optional
 
 import requests
 
@@ -12,8 +15,42 @@ from .web_client import BilibiliWebClient
 from .ctfile_uploader import CtfileUploader
 from .database import DownloadDB
 from .logger import get_logger
+from .progress import (
+    emit_download_started,
+    emit_download_progress,
+    emit_download_finished,
+)
 
 logger = get_logger(__name__)
+
+
+class _DownloadProgress:
+    """聚合多路流（视频+音频）的下载进度，并按合并总大小统一发射 UI 信号。"""
+
+    def __init__(self, bvid: str):
+        self.bvid = bvid
+        self._lock = threading.Lock()
+        self._streams: Dict[str, Dict[str, int]] = {}
+        self._last_percent = -3
+
+    def register_stream(self, stream_key: str, total: int):
+        with self._lock:
+            self._streams[stream_key] = {"total": max(0, total), "current": 0}
+
+    def update_stream(self, stream_key: str, current: int):
+        with self._lock:
+            stream = self._streams.setdefault(stream_key, {"total": 0, "current": 0})
+            stream["current"] = max(0, current)
+            total = sum(s["total"] for s in self._streams.values())
+            current_total = sum(s["current"] for s in self._streams.values())
+            if total > 0:
+                percent = int(min(100, current_total / total * 100))
+                if percent - self._last_percent >= 3:
+                    emit_download_progress(self.bvid, percent)
+                    self._last_percent = percent
+
+    def finish(self):
+        emit_download_progress(self.bvid, 100)
 
 
 def _get_ffmpeg_path() -> str:
@@ -184,16 +221,74 @@ class Downloader:
             filename = filename.replace(old, new)
         return filename
 
-    def _download_file(self, url: str, output_path: str, referer: str) -> bool:
-        """使用 Aria2c 下载单个文件，失败时回退到 requests"""
-        if self.use_aria2:
-            if self._download_file_aria2(url, output_path, referer):
-                return True
-            logger.warning(f"[Download] Aria2 下载失败，回退到 requests: {os.path.basename(output_path)}")
-        return self._download_file_requests(url, output_path, referer)
+    def _get_stream_size(self, url: str, referer: str) -> int:
+        """通过 HEAD 预获取流大小，失败时返回 0。"""
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Referer": referer,
+            }
+            cookies = self.web.get_cookies_dict()
+            resp = requests.head(url, headers=headers, cookies=cookies, timeout=15)
+            if resp.status_code == 200:
+                return int(resp.headers.get("content-length", 0))
+        except Exception:
+            pass
+        return 0
 
-    def _download_file_aria2(self, url: str, output_path: str, referer: str) -> bool:
-        """调用 aria2c 进行多线程下载"""
+    def _download_file(
+        self,
+        url: str,
+        output_path: str,
+        referer: str,
+        bvid: str = "",
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        """使用 Aria2c 下载单个文件，失败时回退到 requests，带指数退避重试。
+
+        progress_callback(current: int, total: int) 供调用方聚合多路流进度。
+        """
+        max_retries = 3
+        # 批量下载前小睡一会，降低请求瞬时并发
+        time.sleep(random.uniform(0.5, 2.0))
+
+        for attempt in range(max_retries):
+            ok = False
+            if self.use_aria2:
+                ok = self._download_file_aria2(url, output_path, referer, bvid, progress_callback)
+                if ok:
+                    return True
+                logger.warning(
+                    f"[Download] Aria2 尝试 {attempt + 1}/{max_retries} 失败: {os.path.basename(output_path)}"
+                )
+            # Aria2 不可用或失败后，使用 requests 再试一次
+            ok = self._download_file_requests(url, output_path, referer, bvid, progress_callback)
+            if ok:
+                return True
+            logger.warning(
+                f"[Download] requests 尝试 {attempt + 1}/{max_retries} 失败: {os.path.basename(output_path)}"
+            )
+
+            if attempt < max_retries - 1:
+                # 指数退避 + 随机抖动，遇到风控时留足冷却时间
+                sleep_time = min(5 * (2 ** attempt) + random.uniform(0, 5), 120)
+                logger.info(f"[Download] {sleep_time:.1f}秒后重试...")
+                time.sleep(sleep_time)
+        logger.error(f"[Download] 全部 {max_retries} 次尝试均失败: {os.path.basename(output_path)}")
+        return False
+
+    def _download_file_aria2(
+        self,
+        url: str,
+        output_path: str,
+        referer: str,
+        bvid: str = "",
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        """调用 aria2c 进行多线程下载，并通过轮询文件大小反馈进度。"""
         try:
             output_dir = os.path.dirname(os.path.abspath(output_path))
             output_name = os.path.basename(output_path)
@@ -209,6 +304,11 @@ class Downloader:
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
             }
 
+            # 预获取总大小，用于进度计算；失败也不影响下载
+            total_size = self._get_stream_size(url, referer)
+            if progress_callback:
+                progress_callback(0, total_size)
+
             cmd = [
                 self.aria2c_path,
                 url,
@@ -218,10 +318,13 @@ class Downloader:
                 "--header", f"Referer: {headers['Referer']}",
                 "--header", f"Accept: {headers['Accept']}",
                 "--header", f"Accept-Language: {headers['Accept-Language']}",
-                "-x", "16",
-                "-s", "16",
+                # 进一步降低连接数，避免批量下载时触发风控
+                "-x", "2",
+                "-s", "2",
                 "-k", "1M",
+                "--max-connection-per-server", "2",
                 "--max-tries", "3",
+                "--retry-wait", "3",
                 "--timeout", "60",
                 "--auto-file-renaming=false",
                 "--allow-overwrite=true",
@@ -232,7 +335,6 @@ class Downloader:
                 cmd.extend(["--header", f"Cookie: {cookie_str}"])
 
             kwargs = {
-                "check": True,
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
             }
@@ -240,9 +342,37 @@ class Downloader:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
             logger.info(f"[Aria2] 开始下载: {output_name}")
-            subprocess.run(cmd, **kwargs)
-            logger.info(f"[Aria2] 下载完成: {output_name}")
-            return True
+            proc = subprocess.Popen(cmd, **kwargs)
+
+            # 轮询进度
+            last_emitted = -3
+            while proc.poll() is None:
+                try:
+                    current_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                    if progress_callback:
+                        progress_callback(current_size, total_size)
+                    elif total_size > 0 and bvid:
+                        # 兼容旧调用：直接按单路流发射
+                        percent = int(current_size / total_size * 100)
+                        if percent - last_emitted >= 5:
+                            emit_download_progress(bvid, percent)
+                            logger.info(f"[Aria2] {output_name}: {percent}%")
+                            last_emitted = percent
+                except Exception:
+                    pass
+                time.sleep(1.0)
+
+            proc.wait()
+            if proc.returncode == 0:
+                if progress_callback:
+                    progress_callback(total_size, total_size)
+                elif bvid:
+                    emit_download_progress(bvid, 100)
+                logger.info(f"[Aria2] 下载完成: {output_name}")
+                return True
+            else:
+                logger.error(f"[Aria2] 下载失败 {url} (exit code {proc.returncode})")
+                return False
         except subprocess.CalledProcessError as e:
             logger.error(f"[Aria2] 下载失败 {url} (exit code {e.returncode})")
             return False
@@ -250,7 +380,14 @@ class Downloader:
             logger.error(f"[Aria2] 下载异常 {url}: {e}")
             return False
 
-    def _download_file_requests(self, url: str, output_path: str, referer: str) -> bool:
+    def _download_file_requests(
+        self,
+        url: str,
+        output_path: str,
+        referer: str,
+        bvid: str = "",
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
         """使用 requests 下载单个文件（回退方案）"""
         try:
             headers = {
@@ -268,16 +405,19 @@ class Downloader:
                 resp.raise_for_status()
                 total = int(resp.headers.get("content-length", 0))
                 downloaded = 0
-                last_log_percent = -5
+                last_log_percent = -3
                 with open(output_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
-                            if total > 0:
+                            if progress_callback:
+                                progress_callback(downloaded, total)
+                            elif total > 0 and bvid:
                                 percent = int(downloaded / total * 100)
                                 if percent - last_log_percent >= 5:
                                     logger.info(f"[Download] {os.path.basename(output_path)}: {percent}%")
+                                    emit_download_progress(bvid, percent)
                                     last_log_percent = percent
             return True
         except Exception as e:
@@ -326,6 +466,8 @@ class Downloader:
         返回 {"success": bool, "quality": str, "output_path": str}
         上传逻辑已解耦到 UploadManager，由调用方在下载成功后自行入队。
         """
+        emit_download_started(bvid, title, uname)
+
         # 1. 获取视频详情
         info = self.video_stream.get_video_info(bvid)
         if not info:
@@ -348,6 +490,7 @@ class Downloader:
             else:
                 reason = "无法获取视频详情（网络异常或无响应）"
             self._record_failure(bvid, title, uname, reason)
+            emit_download_finished(bvid, False, reason)
             return {"success": False, "quality": "", "reason": reason}
 
         cid = info.get("cid")
@@ -355,6 +498,7 @@ class Downloader:
             logger.error(f"[Download] 无法获取 cid: {bvid}")
             reason = "无法获取视频 cid"
             self._record_failure(bvid, title, uname, reason)
+            emit_download_finished(bvid, False, reason)
             return {"success": False, "quality": "", "reason": reason}
 
         # 检查视频属性：充电专属、付费等
@@ -363,6 +507,9 @@ class Downloader:
         is_ugc_pay = bool(rights.get("ugc_pay"))
         is_pay = bool(rights.get("pay"))
         is_arc_pay = bool(rights.get("arc_pay"))
+
+        # 画质名称先初始化为空，避免后续失败分支引用未定义变量
+        quality_str = ""
 
         # 2. 获取 playurl
         target_qn = self.QUALITY_MAP.get(self.quality, 125)
@@ -390,7 +537,8 @@ class Downloader:
             else:
                 reason = "无法获取播放地址（网络异常或无响应）"
             self._record_failure(bvid, title, uname, reason)
-            return {"success": False, "quality": "", "reason": reason}
+            emit_download_finished(bvid, False, reason)
+            return {"success": False, "quality": quality_str, "reason": reason}
 
         # 3. 解析 DASH 直链
         dash = playurl.get("dash")
@@ -398,7 +546,8 @@ class Downloader:
             logger.error(f"[Download] 视频不支持 DASH 格式: {bvid}")
             reason = "充电专属视频，当前账号未开通包月充电"
             self._record_failure(bvid, title, uname, reason)
-            return {"success": False, "quality": "", "reason": reason}
+            emit_download_finished(bvid, False, reason)
+            return {"success": False, "quality": quality_str, "reason": reason}
 
         video_streams = dash.get("video", [])
         audio_streams = dash.get("audio", [])
@@ -407,7 +556,8 @@ class Downloader:
             logger.error(f"[Download] 无可用视频流: {bvid}")
             reason = "无可用视频流"
             self._record_failure(bvid, title, uname, reason)
-            return {"success": False, "quality": "", "reason": reason}
+            emit_download_finished(bvid, False, reason)
+            return {"success": False, "quality": quality_str, "reason": reason}
 
         video_stream = self.video_stream.select_best_stream(video_streams, target_qn)
         audio_stream = self.video_stream.select_best_stream(audio_streams, 9999) if audio_streams else None
@@ -416,7 +566,8 @@ class Downloader:
             logger.error(f"[Download] 无法选择合适的视频流: {bvid}")
             reason = "无法选择合适的视频流（可能画质不可用）"
             self._record_failure(bvid, title, uname, reason)
-            return {"success": False, "quality": "", "reason": reason}
+            emit_download_finished(bvid, False, reason)
+            return {"success": False, "quality": quality_str, "reason": reason}
 
         video_url = video_stream.get("base_url")
         if not video_url:
@@ -435,7 +586,8 @@ class Downloader:
             logger.error(f"[Download] 无可用下载链接: {bvid}")
             reason = "无可用下载链接"
             self._record_failure(bvid, title, uname, reason)
-            return {"success": False, "quality": "", "reason": reason}
+            emit_download_finished(bvid, False, reason)
+            return {"success": False, "quality": quality_str, "reason": reason}
 
         # 4. 构建输出文件名
         quality_str = self._get_quality_label(video_stream)
@@ -447,31 +599,58 @@ class Downloader:
 
         # 5. 下载
         referer = f"https://www.bilibili.com/video/{bvid}"
+        progress = _DownloadProgress(bvid)
 
         if audio_url:
             # DASH 格式：分别下载视频和音频，再合并
             video_tmp = output_path + ".video.m4s"
             audio_tmp = output_path + ".audio.m4s"
 
-            ok1 = self._download_file(video_url, video_tmp, referer)
-            ok2 = self._download_file(audio_url, audio_tmp, referer)
+            video_total = self._get_stream_size(video_url, referer)
+            audio_total = self._get_stream_size(audio_url, referer)
+            progress.register_stream("video", video_total)
+            progress.register_stream("audio", audio_total)
+
+            ok1 = self._download_file(
+                video_url, video_tmp, referer, bvid,
+                progress_callback=lambda c, t: progress.update_stream("video", c),
+            )
+            ok2 = self._download_file(
+                audio_url, audio_tmp, referer, bvid,
+                progress_callback=lambda c, t: progress.update_stream("audio", c),
+            )
             if not (ok1 and ok2):
                 reason = "音视频流下载失败（网络异常或被拦截）"
                 self._record_failure(bvid, title, uname, reason)
+                emit_download_finished(bvid, False, reason)
                 return {"success": False, "quality": quality_str, "reason": reason}
 
+            progress.finish()
             success = self._merge_with_ffmpeg(video_tmp, audio_tmp, output_path)
             if not success:
                 reason = "FFmpeg 音视频合成失败"
                 self._record_failure(bvid, title, uname, reason)
+                emit_download_finished(bvid, False, reason)
                 return {"success": False, "quality": quality_str, "reason": reason}
         else:
             # 无音频分离，直接下载视频（MP4 直链）
-            success = self._download_file(video_url, output_path, referer)
+            total = self._get_stream_size(video_url, referer)
+            progress.register_stream("single", total)
+            success = self._download_file(
+                video_url, output_path, referer, bvid,
+                progress_callback=lambda c, t: progress.update_stream("single", c),
+            )
             if not success:
                 reason = "视频下载失败（网络异常或被拦截）"
                 self._record_failure(bvid, title, uname, reason)
+                emit_download_finished(bvid, False, reason)
                 return {"success": False, "quality": quality_str, "reason": reason}
+            progress.finish()
 
+        # 记录文件元数据，供上传记录反查 BV/标题/UP主
+        if self.db:
+            self.db.add_file_metadata(output_path, bvid, title, uname)
+
+        emit_download_finished(bvid, True, "下载完成")
         # 下载完成后返回本地文件路径，上传由 UploadManager 异步批量处理
         return {"success": True, "quality": quality_str, "output_path": output_path}

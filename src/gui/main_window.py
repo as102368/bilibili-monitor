@@ -2,6 +2,7 @@ import sys
 import os
 import asyncio
 import logging
+import random
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -37,8 +38,10 @@ from ..config_loader import load_config, save_config
 from ..monitor import BilibiliMonitor
 from ..logger import setup_logging, get_logger
 from .log_handler import LogEmitter, GuiLogHandler
+from .status_tab import StatusTab
 from ..upload_manager import UploadManager
 from ..ctfile_uploader import CtfileUploader
+from ..progress import ProgressTracker
 
 logger = get_logger(__name__)
 from .filename_template_builder import FilenameTemplateBuilder
@@ -165,21 +168,21 @@ class HistoryTab(QWidget):
         layout.addLayout(search_layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "UP主ID", "画质", "下载时间"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "画质", "下载时间"])
         header = self.table.horizontalHeader()
         header.setSectionsMovable(True)
         header.setStretchLastSection(True)
-        for col in range(7):
+        for col in range(6):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 240)
-        self.table.setColumnWidth(3, 100)
+        self.table.setColumnWidth(2, 260)
+        self.table.setColumnWidth(3, 120)
         self.table.setColumnWidth(4, 80)
-        self.table.setColumnWidth(5, 80)
-        self.table.setColumnWidth(6, 160)
+        self.table.setColumnWidth(5, 160)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
@@ -235,20 +238,27 @@ class HistoryTab(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(row.get("bvid", "")))
             self.table.setItem(i, 2, QTableWidgetItem(row.get("title", "")))
             self.table.setItem(i, 3, QTableWidgetItem(row.get("uploader", "")))
-            self.table.setItem(i, 4, QTableWidgetItem(str(row.get("uploader_id", ""))))
-            self.table.setItem(i, 5, QTableWidgetItem(row.get("quality", "")))
-            self.table.setItem(i, 6, QTableWidgetItem(row.get("downloaded_at", "")))
+            self.table.setItem(i, 4, QTableWidgetItem(row.get("quality", "")))
+            self.table.setItem(i, 5, QTableWidgetItem(row.get("downloaded_at", "")))
 
     def get_selected_rows(self) -> list:
-        result = []
+        selected_rows = set()
+        # 复选框选中
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                result.append({
-                    "bvid": self.table.item(row, 1).text() if self.table.item(row, 1) else "",
-                    "title": self.table.item(row, 2).text() if self.table.item(row, 2) else "",
-                    "uploader": self.table.item(row, 3).text() if self.table.item(row, 3) else "",
-                })
+                selected_rows.add(row)
+        # 行选择（左键拖拽框选）
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        result = []
+        for row in sorted(selected_rows):
+            result.append({
+                "bvid": self.table.item(row, 1).text() if self.table.item(row, 1) else "",
+                "title": self.table.item(row, 2).text() if self.table.item(row, 2) else "",
+                "uploader": self.table.item(row, 3).text() if self.table.item(row, 3) else "",
+            })
         return result
 
 
@@ -296,6 +306,7 @@ class UploadTab(QWidget):
         self.table.setColumnWidth(8, 160)
         self.table.setColumnWidth(9, 200)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
@@ -360,13 +371,19 @@ class UploadTab(QWidget):
             self.table.setItem(i, 9, QTableWidgetItem(row.get("message", "")))
 
     def get_selected_rows(self) -> list:
-        result = []
+        selected_rows = set()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                result.append({
-                    "id": int(self.table.item(row, 1).text()) if self.table.item(row, 1) else 0,
-                })
+                selected_rows.add(row)
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        result = []
+        for row in sorted(selected_rows):
+            result.append({
+                "id": int(self.table.item(row, 1).text()) if self.table.item(row, 1) else 0,
+            })
         return result
 
 
@@ -410,6 +427,7 @@ class FailureTab(QWidget):
         self.table.setColumnWidth(6, 160)
         self.table.setColumnWidth(7, 80)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
@@ -475,6 +493,8 @@ class FailureTab(QWidget):
             status_display = {
                 "pending": "待重试",
                 "retried": "已重试",
+                "retried_success": "已重试成功",
+                "retried_failed": "仍失败",
                 "skipped": "跳过",
                 "success": "成功",
                 "failed": "失败",
@@ -482,6 +502,22 @@ class FailureTab(QWidget):
             self.table.setItem(i, 7, QTableWidgetItem(status_display))
 
     def selected_row(self) -> dict | None:
+        # 优先按复选框判断选中，与批量删除逻辑保持一致
+        checked_rows = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.checkState() == Qt.Checked:
+                checked_rows.append(row)
+        if checked_rows:
+            row_idx = checked_rows[0]
+            return {
+                "id": self.table.item(row_idx, 1).text() if self.table.item(row_idx, 1) else "",
+                "bvid": self.table.item(row_idx, 2).text() if self.table.item(row_idx, 2) else "",
+                "title": self.table.item(row_idx, 3).text() if self.table.item(row_idx, 3) else "",
+                "uploader": self.table.item(row_idx, 4).text() if self.table.item(row_idx, 4) else "",
+                "reason": self.table.item(row_idx, 5).text() if self.table.item(row_idx, 5) else "",
+            }
+        # 兼容直接点选行
         selected = self.table.selectedItems()
         if not selected:
             return None
@@ -495,13 +531,19 @@ class FailureTab(QWidget):
         }
 
     def get_selected_rows(self) -> list:
-        result = []
+        selected_rows = set()
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                result.append({
-                    "id": int(self.table.item(row, 1).text()) if self.table.item(row, 1) else 0,
-                })
+                selected_rows.add(row)
+        for item in self.table.selectedItems():
+            selected_rows.add(item.row())
+
+        result = []
+        for row in sorted(selected_rows):
+            result.append({
+                "id": int(self.table.item(row, 1).text()) if self.table.item(row, 1) else 0,
+            })
         return result
 
 
@@ -556,6 +598,7 @@ class CtfileDeduplicateTab(QWidget):
         self.table.setColumnWidth(4, 140)
         self.table.setColumnWidth(5, 80)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
@@ -797,6 +840,7 @@ class BatchDownloadTab(QWidget):
         self.table.setColumnWidth(4, 140)
         self.table.setColumnWidth(5, 60)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
@@ -893,9 +937,13 @@ class MainWindow(QMainWindow):
         self.avatar_btn.setCursor(Qt.PointingHandCursor)
         self.avatar_btn.clicked.connect(self._on_open_user_center)
         self.avatar_btn.hide()
+        self.user_info_label = QLabel("")
+        self.user_info_label.setStyleSheet("color: #cccccc; font-size: 12px;")
+        self.user_info_label.hide()
         header_layout.addWidget(self.back_btn)
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.user_info_label)
         header_layout.addWidget(self.login_btn)
         header_layout.addWidget(self.avatar_btn)
         layout.addLayout(header_layout)
@@ -943,6 +991,18 @@ class MainWindow(QMainWindow):
 
         # 下载历史页
         self.history_tab = HistoryTab()
+        # 运行状态页（控制台/进度）
+        self.status_tab = StatusTab()
+        tracker = ProgressTracker.instance()
+        tracker.download_started.connect(self.status_tab.on_download_started)
+        tracker.download_progress.connect(self.status_tab.on_download_progress)
+        tracker.download_finished.connect(self.status_tab.on_download_finished)
+        tracker.upload_started.connect(self.status_tab.on_upload_started)
+        tracker.upload_progress.connect(self.status_tab.on_upload_progress)
+        tracker.upload_finished.connect(self.status_tab.on_upload_finished)
+        self.status_tab.upload_btn.clicked.connect(self._on_manual_upload_all)
+        self.tabs.addTab(self.status_tab, "运行状态")
+
         self.history_tab.refresh_btn.clicked.connect(self._refresh_history)
         self.history_tab.redownload_btn.clicked.connect(self._on_redownload_history)
         self.history_tab.batch_delete_btn.clicked.connect(self._on_batch_delete_history)
@@ -1138,10 +1198,15 @@ class MainWindow(QMainWindow):
             result = await asyncio.to_thread(downloader.download, bvid, title, uname)
 
             if result.get("success"):
-                db.delete_failure(failure_id)
+                db.mark_downloaded(bvid, title, uname, 0, result.get("quality", ""))
+                output_path = result.get("output_path", "")
+                if output_path:
+                    db.add_file_metadata(output_path, bvid, title, uname)
+                db.update_failure_status(failure_id, "retried_success", "已重试成功")
                 QMessageBox.information(self, "重试成功", f"{bvid} 下载成功")
             else:
                 new_reason = result.get("reason", "")
+                db.update_failure_status(failure_id, "retried_failed", new_reason)
                 QMessageBox.warning(
                     self, "重试失败",
                     f"{bvid} 仍然下载失败\n失败原因: {new_reason}"
@@ -1204,12 +1269,7 @@ class MainWindow(QMainWindow):
             uname = row.get("uploader", "")
             if not bvid:
                 continue
-            from ..database import DownloadDB
-            db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
-            db = DownloadDB(db_path)
-            if db.is_downloaded(bvid):
-                logger.info(f"[History] {bvid} 已下载或已跳过，跳过")
-                continue
+            # 允许手动重新下载，即使已下载过（例如换画质重下）
             self.redownload_queue.append((bvid, title, uname))
         self.history_tab.select_all_checkbox.setChecked(False)
         if not self.redownload_running:
@@ -1225,9 +1285,6 @@ class MainWindow(QMainWindow):
                 from ..database import DownloadDB
                 db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
                 db = DownloadDB(db_path)
-                if db.is_downloaded(bvid):
-                    logger.info(f"[GUI] {bvid} 已下载或已跳过，跳过")
-                    continue
                 try:
                     downloader = await self._get_downloader()
                     logger.info(f"[RedownloadWorker] 获取下载器结果: {downloader is not None}")
@@ -1236,17 +1293,135 @@ class MainWindow(QMainWindow):
                     result = await asyncio.to_thread(downloader.download, bvid, title, uname)
                     logger.info(f"[RedownloadWorker] {bvid} 下载结果: {result}")
                     if result.get("success"):
+                        db.mark_downloaded(bvid, title, uname, 0, result.get("quality", ""))
+                        output_path = result.get("output_path", "")
+                        if output_path:
+                            db.add_file_metadata(output_path, bvid, title, uname)
                         self._refresh_history()
-                        logger.info(f"[RedownloadWorker] {bvid} 下载完成，上传由 UploadManager 扫描目录自动处理")
+                        logger.info(f"[RedownloadWorker] {bvid} 下载完成，已写入下载历史")
                     else:
                         reason = result.get("reason", "")
                         if "充电专属" in reason:
                             logger.info(f"[GUI] {bvid} 为充电专属视频，跳过")
                 except Exception as e:
                     logger.error(f"[GUI] 重新下载失败 {bvid}: {e}")
+                # 批量下载时两两之间增加随机间隔，降低风控概率
+                if self.redownload_queue:
+                    delay = random.uniform(5, 10)
+                    logger.info(f"[RedownloadWorker] 队列剩余 {len(self.redownload_queue)}，等待 {delay:.1f}s 后继续")
+                    await asyncio.sleep(delay)
         finally:
             self.redownload_running = False
             logger.info("[RedownloadWorker] 结束")
+
+    def _on_manual_upload_all(self):
+        """手动批量上传：扫描 downloads 目录下所有 mp4，不限制 10 个一批，与 UploadManager 独立。"""
+        try:
+            ctfile_cfg = self.config.get("ctfile", {})
+            if not ctfile_cfg.get("session"):
+                QMessageBox.warning(self, "未配置", "请先配置城通网盘 Session Token")
+                return
+
+            download_dir = self.config.get("download", {}).get("output_dir", "./downloads")
+            if not os.path.isdir(download_dir):
+                QMessageBox.warning(self, "目录不存在", f"下载目录不存在: {download_dir}")
+                return
+
+            files = [
+                os.path.join(download_dir, name)
+                for name in os.listdir(download_dir)
+                if name.lower().endswith(".mp4")
+                and os.path.isfile(os.path.join(download_dir, name))
+            ]
+            if not files:
+                QMessageBox.information(self, "提示", "downloads 目录下没有可上传的 mp4 文件")
+                return
+
+            reply = QMessageBox.question(
+                self,
+                "确认上传",
+                f"即将上传 {len(files)} 个 mp4 文件到城通网盘，是否继续？",
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            logger.info(f"[ManualUpload] 用户确认，开始创建上传任务，文件数: {len(files)}")
+            self.status_tab.upload_btn.setEnabled(False)
+            QMessageBox.information(self, "开始上传", f"已开始上传 {len(files)} 个文件，可在运行状态页查看进度")
+            asyncio.create_task(self._do_manual_upload_all(files, ctfile_cfg))
+        except Exception as e:
+            logger.exception("[ManualUpload] 启动手动上传失败")
+            self.status_tab.upload_btn.setEnabled(True)
+            QMessageBox.critical(self, "错误", f"启动上传失败: {e}")
+
+    async def _do_manual_upload_all(self, files: list, ctfile_cfg: dict):
+        total = len(files)
+        success = 0
+        logger.info(f"[ManualUpload] 开始手动批量上传，共 {total} 个文件")
+        try:
+            uploader = CtfileUploader(
+                session_token=ctfile_cfg["session"],
+                folder_id=ctfile_cfg.get("folder_id", "0"),
+            )
+            from ..database import DownloadDB
+            db = DownloadDB(self.config.get("database", {}).get("path", "./data/downloaded.db"))
+
+            for idx, file_path in enumerate(files, 1):
+                file_name = os.path.basename(file_path)
+                logger.info(f"[ManualUpload] [{idx}/{total}] 开始上传: {file_name}")
+                emit_upload_started(file_name)
+                file_size = os.path.getsize(file_path)
+                meta = db.get_file_metadata_by_name(file_name)
+                bvid = meta.get("bvid", "")
+                title = meta.get("title", "")
+                uploader_name = meta.get("uploader", "")
+                ok = False
+                message = "上传失败"
+                try:
+                    ok = await asyncio.wait_for(
+                        asyncio.to_thread(uploader.upload_file, file_path),
+                        timeout=300,
+                    )
+                    message = "手动上传成功" if ok else "手动上传失败"
+                except asyncio.TimeoutError:
+                    message = "手动上传超时（超过 5 分钟）"
+                    logger.error(f"[ManualUpload] 上传超时: {file_name}")
+                except Exception as e:
+                    message = f"手动上传异常: {e}"
+                    logger.exception(f"[ManualUpload] 上传异常: {file_name}")
+
+                try:
+                    db.add_upload_record(
+                        bvid=bvid,
+                        title=title,
+                        uploader=uploader_name,
+                        file_name=file_name,
+                        file_size=file_size,
+                        status="success" if ok else "failed",
+                        message=message,
+                        file_path=file_path,
+                    )
+                except Exception:
+                    logger.exception(f"[ManualUpload] 记录上传日志失败: {file_name}")
+
+                emit_upload_finished(file_name, ok, message)
+
+                if ok:
+                    success += 1
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                            logger.info(f"[ManualUpload] 已删除本地文件: {file_name}")
+                    except OSError as e:
+                        logger.error(f"[ManualUpload] 删除本地文件失败 {file_path}: {e}")
+
+            logger.info(f"[ManualUpload] 手动批量上传完成: 成功 {success}/{total}")
+            QMessageBox.information(self, "上传完成", f"共 {total} 个文件，成功 {success} 个")
+        except Exception as e:
+            logger.exception("[ManualUpload] 手动批量上传任务异常")
+            QMessageBox.critical(self, "上传错误", f"上传过程中发生错误: {e}")
+        finally:
+            self.status_tab.upload_btn.setEnabled(True)
 
     def _on_batch_delete_history(self):
         rows = self.history_tab.get_selected_rows()
@@ -1567,8 +1742,9 @@ class MainWindow(QMainWindow):
                     logger.exception("[UserCenterDownload] 回调执行异常")
                     raise
 
+            db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
             if self.user_center_widget is None:
-                self.user_center_widget = UserCenterDialog(web, download_callback, self)
+                self.user_center_widget = UserCenterDialog(web, db_path, download_callback, self)
                 self.content_stack.addWidget(self.user_center_widget)
             self.content_stack.setCurrentWidget(self.user_center_widget)
             self.title_label.setText("用户中心")
@@ -1583,7 +1759,7 @@ class MainWindow(QMainWindow):
         self.back_btn.hide()
 
     def _refresh_avatar(self):
-        """根据当前配置刷新右上角头像"""
+        """根据当前配置刷新右上角头像、用户名和 UID"""
         cfg = self.config.get("cookie", {})
         sessdata = cfg.get("sessdata", "")
         bili_jct = cfg.get("bili_jct", "")
@@ -1591,6 +1767,8 @@ class MainWindow(QMainWindow):
         dedeuserid = cfg.get("dedeuserid", "")
         if not sessdata or not bili_jct:
             self.avatar_btn.hide()
+            self.user_info_label.hide()
+            self.login_btn.show()
             return
         try:
             from ..web_client import BilibiliWebClient
@@ -1605,7 +1783,13 @@ class MainWindow(QMainWindow):
                 referer="https://www.bilibili.com",
             )
             if data.get("code") == 0:
-                face_url = data["data"].get("face", "")
+                user_data = data.get("data", {})
+                uname = user_data.get("uname", "")
+                mid = user_data.get("mid", 0)
+                face_url = user_data.get("face", "")
+                self.user_info_label.setText(uname)
+                self.user_info_label.setToolTip("点击头像打开用户中心")
+                self.user_info_label.show()
                 if face_url:
                     resp = web.session.get(face_url, timeout=15)
                     resp.raise_for_status()
@@ -1617,14 +1801,23 @@ class MainWindow(QMainWindow):
                         )
                         self.avatar_btn.setIcon(QIcon(scaled))
                         self.avatar_btn.setIconSize(QSize(32, 32))
-                        self.avatar_btn.setToolTip("点击打开用户中心")
+                        self.avatar_btn.setToolTip(f"{uname}\n点击打开用户中心")
                         self.avatar_btn.show()
                         self.login_btn.hide()
                         self.user_face_url = face_url
                         return
+                # 没有头像也显示用户名和占位头像按钮
+                self.avatar_btn.setIcon(QIcon())
+                self.avatar_btn.setToolTip(f"{uname}\n点击打开用户中心")
+                self.avatar_btn.show()
+                self.login_btn.hide()
+                return
+            else:
+                logging.warning(f"[GUI] 获取登录信息失败: {data}")
         except Exception as e:
             logging.warning(f"[GUI] 刷新头像失败: {e}")
         self.avatar_btn.hide()
+        self.user_info_label.hide()
         self.login_btn.show()
 
     def closeEvent(self, event):

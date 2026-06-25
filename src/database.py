@@ -16,6 +16,7 @@ class DownloadDB:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_table()
         self._init_uploads_table()
+        self._init_file_metadata_table()
         self._init_failures_table()
 
     def _init_table(self):
@@ -207,6 +208,61 @@ class DownloadDB:
         )
         self.conn.commit()
 
+    # ---------- file metadata (for directory-scan upload records) ----------
+
+    def _init_file_metadata_table(self):
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_name TEXT,
+                file_path TEXT,
+                bvid TEXT,
+                title TEXT,
+                uploader TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_metadata_name ON file_metadata(file_name)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_metadata_path ON file_metadata(file_path)"
+        )
+        self.conn.commit()
+
+    def add_file_metadata(self, file_path: str, bvid: str, title: str, uploader: str):
+        file_name = os.path.basename(file_path)
+        self.conn.execute(
+            """
+            INSERT INTO file_metadata (file_name, file_path, bvid, title, uploader, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (file_name, file_path, bvid, title, uploader, _format_ts()),
+        )
+        self.conn.commit()
+
+    def get_file_metadata_by_name(self, file_name: str) -> dict:
+        cur = self.conn.execute(
+            "SELECT bvid, title, uploader FROM file_metadata WHERE file_name = ? ORDER BY created_at DESC LIMIT 1",
+            (file_name,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {"bvid": row[0], "title": row[1], "uploader": row[2]}
+        return {"bvid": "", "title": "", "uploader": ""}
+
+    def get_file_metadata_by_path(self, file_path: str) -> dict:
+        cur = self.conn.execute(
+            "SELECT bvid, title, uploader FROM file_metadata WHERE file_path = ? ORDER BY created_at DESC LIMIT 1",
+            (file_path,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {"bvid": row[0], "title": row[1], "uploader": row[2]}
+        return {"bvid": "", "title": "", "uploader": ""}
+
     def get_upload_list(self, limit: int = 10000) -> list:
         cur = self.conn.execute(
             """
@@ -325,6 +381,29 @@ class DownloadDB:
             (failure_id,),
         )
         self.conn.commit()
+
+    def update_failure_status(self, failure_id: int, status: str, reason: str | None = None):
+        if reason is not None:
+            self.conn.execute(
+                "UPDATE failures SET status = ?, reason = ?, created_at = ? WHERE id = ?",
+                (status, reason, _format_ts(), failure_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE failures SET status = ?, created_at = ? WHERE id = ?",
+                (status, _format_ts(), failure_id),
+            )
+        self.conn.commit()
+
+    def get_failure_by_bvid(self, bvid: str) -> dict:
+        cur = self.conn.execute(
+            "SELECT id, reason, status FROM failures WHERE bvid = ? ORDER BY created_at DESC LIMIT 1",
+            (bvid,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {"id": row[0], "reason": row[1], "status": row[2]}
+        return {}
 
     def mark_failure_skipped(self, bvid: str):
         self.conn.execute(

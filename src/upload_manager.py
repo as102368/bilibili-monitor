@@ -6,6 +6,10 @@ from typing import Dict, List, Optional
 from .ctfile_uploader import CtfileUploader
 from .database import DownloadDB
 from .logger import get_logger
+from .progress import (
+    emit_upload_started,
+    emit_upload_finished,
+)
 
 logger = get_logger(__name__)
 
@@ -77,12 +81,11 @@ class UploadManager:
         return [f[0] for f in files]
 
     async def start_worker(self):
-        """启动后台上传 worker。"""
-        if self._running:
+        """启动后台上传 worker；若 worker 已异常退出则自动重启。"""
+        if self._worker_task and not self._worker_task.done():
             return
         self._running = True
         self._stop_event.clear()
-        # 使用 get_event_loop().create_task，允许在事件循环尚未 run_forever 时预先调度
         self._worker_task = asyncio.get_event_loop().create_task(self._upload_worker())
         logger.info("[UploadManager] 上传 worker 已启动")
 
@@ -102,9 +105,19 @@ class UploadManager:
         logger.info("[UploadManager] 上传 worker 已停止")
 
     async def _upload_worker(self):
+        last_heartbeat = time.time()
         while self._running:
             try:
+                # 心跳：每分钟打一次日志，方便排查 worker 是否活着
+                if time.time() - last_heartbeat >= 60:
+                    logger.info("[UploadManager] worker 心跳正常")
+                    last_heartbeat = time.time()
+
                 files = self._scan_files()
+                # 先把所有候选文件展示到上传队列，让用户能看到排队状态
+                for file_path in files:
+                    emit_upload_started(os.path.basename(file_path))
+
                 if len(files) >= self.BATCH_SIZE:
                     await self._upload_batch(files[: self.BATCH_SIZE])
                 else:
@@ -118,7 +131,7 @@ class UploadManager:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.exception("[UploadManager] 上传 worker 异常")
+                logger.exception("[UploadManager] 上传 worker 异常，5 秒后恢复")
                 await asyncio.sleep(self.CHECK_INTERVAL)
 
     async def _upload_batch(self, file_paths: List[str]):
@@ -133,45 +146,70 @@ class UploadManager:
                 continue
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
+            meta = self.db.get_file_metadata_by_name(file_name)
+            bvid = meta.get("bvid", "")
+            title = meta.get("title", "")
+            uploader = meta.get("uploader", "")
+            emit_upload_started(file_name)
             try:
-                ok = await asyncio.to_thread(self.uploader.upload_file, file_path)
+                # 单个文件上传最多等待 5 分钟，避免接口挂死导致整个 worker 停止
+                ok = await asyncio.wait_for(
+                    asyncio.to_thread(self.uploader.upload_file, file_path),
+                    timeout=300,
+                )
                 if ok:
                     success_paths.append(file_path)
                     self.db.add_upload_record(
-                        bvid="",
-                        title="",
-                        uploader="",
+                        bvid=bvid,
+                        title=title,
+                        uploader=uploader,
                         file_name=file_name,
                         file_size=file_size,
                         status="success",
                         message="上传成功",
                         file_path=file_path,
                     )
+                    emit_upload_finished(file_name, True, "上传成功")
                     logger.info(f"[UploadManager] 上传成功: {file_name}")
                 else:
                     self.db.add_upload_record(
-                        bvid="",
-                        title="",
-                        uploader="",
+                        bvid=bvid,
+                        title=title,
+                        uploader=uploader,
                         file_name=file_name,
                         file_size=file_size,
                         status="failed",
                         message="上传失败，保留本地文件稍后重试",
                         file_path=file_path,
                     )
+                    emit_upload_finished(file_name, False, "上传失败，保留本地文件稍后重试")
                     logger.warning(f"[UploadManager] 上传失败，保留本地文件稍后重试: {file_name}")
+            except asyncio.TimeoutError:
+                logger.error(f"[UploadManager] 上传超时: {file_name}")
+                self.db.add_upload_record(
+                    bvid=bvid,
+                    title=title,
+                    uploader=uploader,
+                    file_name=file_name,
+                    file_size=file_size,
+                    status="failed",
+                    message="上传超时（超过 5 分钟）",
+                    file_path=file_path,
+                )
+                emit_upload_finished(file_name, False, "上传超时（超过 5 分钟）")
             except Exception as e:
                 logger.exception(f"[UploadManager] 上传异常: {file_name}")
                 self.db.add_upload_record(
-                    bvid="",
-                    title="",
-                    uploader="",
+                    bvid=bvid,
+                    title=title,
+                    uploader=uploader,
                     file_name=file_name,
                     file_size=file_size,
                     status="failed",
                     message=f"上传异常: {e}",
                     file_path=file_path,
                 )
+                emit_upload_finished(file_name, False, f"上传异常: {e}")
 
         # 上传成功的文件统一删除本地源文件
         for file_path in success_paths:
