@@ -543,6 +543,7 @@ class UserCenterDialog(QWidget):
         dialog.exec()
 
     def _on_download_selected_fav_videos(self):
+        logger.info("[UserCenter] 点击批量下载收藏视频")
         rows = self._get_table_selected_rows(self.fav_video_table)
         videos = []
         for row in rows:
@@ -554,9 +555,10 @@ class UserCenterDialog(QWidget):
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
-        self.download_callback(videos)
+        self._safe_download_callback(videos)
 
     def _on_download_table_videos(self, table: QTableWidget):
+        logger.info("[UserCenter] 点击批量下载表格视频")
         rows = self._get_table_selected_rows(table)
         videos = []
         for row in rows:
@@ -568,7 +570,16 @@ class UserCenterDialog(QWidget):
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
-        self.download_callback(videos)
+        self._safe_download_callback(videos)
+
+    def _safe_download_callback(self, videos: list):
+        try:
+            logger.info(f"[UserCenter] 触发下载回调，数量: {len(videos)}")
+            self.download_callback(videos)
+            logger.info("[UserCenter] 下载回调执行成功")
+        except Exception:
+            logger.exception("[UserCenter] 下载回调执行失败")
+            QMessageBox.critical(self, "错误", "启动下载失败，请查看日志")
 
 
 class UpVideoDialog(QDialog):
@@ -865,6 +876,7 @@ class MultiUpDownloadDialog(QDialog):
             self.table.setItem(i, 4, QTableWidgetItem(_ts_to_str(v.get("created", 0))))
 
     def _on_download_selected(self):
+        logger.info("[MultiUpDownload] 点击批量下载选中视频")
         videos = []
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
@@ -874,10 +886,17 @@ class MultiUpDownloadDialog(QDialog):
                 uname = self.table.item(row, 3).text() or ""
                 if bvid:
                     videos.append({"bvid": bvid, "title": title, "uname": uname})
+        logger.info(f"[MultiUpDownload] 勾选视频数量: {len(videos)}")
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
-        self.download_callback(videos)
+        try:
+            self.download_callback(videos)
+            logger.info("[MultiUpDownload] 回调执行成功")
+        except Exception:
+            logger.exception("[MultiUpDownload] 回调执行失败")
+            QMessageBox.critical(self, "错误", "启动下载失败，请查看日志")
+            return
         QMessageBox.information(self, "提示", f"已将 {len(videos)} 个视频加入下载队列")
 
 

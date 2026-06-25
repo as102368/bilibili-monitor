@@ -35,8 +35,12 @@ from PySide6.QtGui import QIcon, QPixmap
 
 from ..config_loader import load_config, save_config
 from ..monitor import BilibiliMonitor
-from ..logger import setup_logging
+from ..logger import setup_logging, get_logger
 from .log_handler import LogEmitter, GuiLogHandler
+from ..upload_manager import UploadManager
+from ..ctfile_uploader import CtfileUploader
+
+logger = get_logger(__name__)
 from .filename_template_builder import FilenameTemplateBuilder
 
 
@@ -849,9 +853,23 @@ class MainWindow(QMainWindow):
         self.redownload_running = False
         self.user_face_url = ""
 
+        # 上传管理器（与下载解耦，扫描下载目录满 10 个一批上传）
+        db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
+        download_dir = self.config.get("download", {}).get("output_dir", "./downloads")
+        ctfile_cfg = self.config.get("ctfile", {})
+        ctfile_uploader = None
+        if ctfile_cfg.get("upload_after_download") and ctfile_cfg.get("session"):
+            ctfile_uploader = CtfileUploader(
+                session_token=ctfile_cfg["session"],
+                folder_id=ctfile_cfg.get("folder_id", "0"),
+            )
+        self.upload_manager = UploadManager(download_dir, db_path, ctfile_uploader)
+
         self._build_ui()
         self._refresh_avatar()
         self._setup_logging()
+        # 事件循环已设置但尚未 run_forever，使用 loop.create_task 预调度
+        asyncio.get_event_loop().create_task(self.upload_manager.start_worker())
 
     def _build_ui(self):
         central = QWidget()
@@ -972,8 +990,20 @@ class MainWindow(QMainWindow):
     def _setup_logging(self):
         self.log_emitter = LogEmitter()
         self.log_emitter.log_signal.connect(self._append_log)
-        handler = GuiLogHandler(self.log_emitter)
-        setup_logging(level=logging.INFO, handler=handler)
+        handlers = [GuiLogHandler(self.log_emitter)]
+        # 同时写入文件，方便打包后排查问题（相对于当前工作目录，即 BASE_DIR）
+        try:
+            log_dir = os.path.join(os.getcwd(), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.FileHandler(
+                os.path.join(log_dir, "app.log"), encoding="utf-8", mode="a"
+            )
+            file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+            handlers.append(file_handler)
+        except Exception:
+            logging.exception("初始化文件日志失败")
+        for handler in handlers:
+            setup_logging(level=logging.INFO, handler=handler)
 
     def _append_log(self, msg: str):
         self.log_edit.append(msg)
@@ -1122,19 +1152,24 @@ class MainWindow(QMainWindow):
             self.failure_tab.retry_btn.setEnabled(True)
 
     async def _get_downloader(self):
+        logger.info("[GetDownloader] 开始获取下载器")
         if self.monitor and self.monitor.downloader:
+            logger.info("[GetDownloader] 使用 monitor 已有下载器")
             return self.monitor.downloader
 
         cfg = self.config_tab.get_config()
         cfg.update(self.settings_tab.get_config())
         if not cfg.get("cookie", {}).get("sessdata") or not cfg.get("cookie", {}).get("bili_jct"):
+            logger.warning("[GetDownloader] Cookie 不完整，返回 None")
             return None
 
         try:
             temp_monitor = BilibiliMonitor(cfg)
             await temp_monitor.init()
+            logger.info("[GetDownloader] 临时 monitor 初始化成功")
             return temp_monitor.downloader
         except Exception:
+            logger.exception("[GetDownloader] 临时 monitor 初始化失败")
             return None
 
     def _on_delete_failure(self):
@@ -1181,10 +1216,12 @@ class MainWindow(QMainWindow):
             asyncio.create_task(self._redownload_worker())
 
     async def _redownload_worker(self):
+        logger.info(f"[RedownloadWorker] 启动，当前队列长度: {len(self.redownload_queue)}")
         self.redownload_running = True
         try:
             while self.redownload_queue:
                 bvid, title, uname = self.redownload_queue.pop(0)
+                logger.info(f"[RedownloadWorker] 开始处理 {bvid}")
                 from ..database import DownloadDB
                 db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
                 db = DownloadDB(db_path)
@@ -1193,23 +1230,23 @@ class MainWindow(QMainWindow):
                     continue
                 try:
                     downloader = await self._get_downloader()
+                    logger.info(f"[RedownloadWorker] 获取下载器结果: {downloader is not None}")
                     if not downloader:
                         continue
                     result = await asyncio.to_thread(downloader.download, bvid, title, uname)
+                    logger.info(f"[RedownloadWorker] {bvid} 下载结果: {result}")
                     if result.get("success"):
                         self._refresh_history()
+                        logger.info(f"[RedownloadWorker] {bvid} 下载完成，上传由 UploadManager 扫描目录自动处理")
                     else:
                         reason = result.get("reason", "")
-                        if "城通网盘上传失败" in reason:
-                            logger.warning(f"[GUI] {bvid} 城通网盘上传失败，10 秒后自动重新下载")
-                            await asyncio.sleep(10)
-                            self.redownload_queue.append((bvid, title, uname))
-                        elif "充电专属" in reason:
+                        if "充电专属" in reason:
                             logger.info(f"[GUI] {bvid} 为充电专属视频，跳过")
                 except Exception as e:
                     logger.error(f"[GUI] 重新下载失败 {bvid}: {e}")
         finally:
             self.redownload_running = False
+            logger.info("[RedownloadWorker] 结束")
 
     def _on_batch_delete_history(self):
         rows = self.history_tab.get_selected_rows()
@@ -1438,7 +1475,9 @@ class MainWindow(QMainWindow):
             self.batch_tab.scan_btn.setEnabled(True)
 
     def _on_batch_download(self):
+        logger.info("[BatchDownload] 点击下载选中")
         videos = self.batch_tab.get_selected_videos()
+        logger.info(f"[BatchDownload] 选中视频数量: {len(videos)}")
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选要下载的视频")
             return
@@ -1446,8 +1485,11 @@ class MainWindow(QMainWindow):
             self, "确认下载",
             f"确定下载选中的 {len(videos)} 个视频吗？"
         )
+        logger.info(f"[BatchDownload] 确认框返回值: {reply} (Yes={QMessageBox.Yes})")
         if reply != QMessageBox.Yes:
+            logger.info("[BatchDownload] 用户取消或未点击是，直接返回")
             return
+        queued = 0
         for v in videos:
             bvid = v.get("bvid", "")
             title = v.get("title", "")
@@ -1461,8 +1503,15 @@ class MainWindow(QMainWindow):
                 logger.info(f"[Batch] {bvid} 已下载或已跳过，跳过")
                 continue
             self.redownload_queue.append((bvid, title, uname))
+            queued += 1
+        logger.info(f"[BatchDownload] 实际入队数量: {queued}, 队列总长度: {len(self.redownload_queue)}, worker运行中: {self.redownload_running}")
         if not self.redownload_running:
-            asyncio.create_task(self._redownload_worker())
+            try:
+                task = asyncio.create_task(self._redownload_worker())
+                logger.info(f"[BatchDownload] 已创建下载任务: {task}")
+            except Exception:
+                logger.exception("[BatchDownload] 创建下载任务失败")
+                QMessageBox.critical(self, "错误", "启动下载任务失败，请查看日志")
 
     def _on_qr_login(self):
         from .qr_login_dialog import QrLoginDialog
@@ -1499,16 +1548,24 @@ class MainWindow(QMainWindow):
             )
 
             def download_callback(videos: list):
-                for v in videos:
-                    bvid = v.get("bvid", "")
-                    title = v.get("title", "")
-                    uname = v.get("uname", "")
-                    if bvid:
-                        self.redownload_queue.append((bvid, title, uname))
-                if not self.redownload_running:
-                    asyncio.create_task(self._redownload_worker())
-                self._on_back_to_home()
-                self.tabs.setCurrentIndex(self.tabs.indexOf(self.history_tab))
+                logger.info(f"[UserCenterDownload] 回调触发，视频数量: {len(videos)}")
+                try:
+                    for v in videos:
+                        bvid = v.get("bvid", "")
+                        title = v.get("title", "")
+                        uname = v.get("uname", "")
+                        if bvid:
+                            self.redownload_queue.append((bvid, title, uname))
+                    logger.info(f"[UserCenterDownload] 入队完成，队列长度: {len(self.redownload_queue)}, worker运行中: {self.redownload_running}")
+                    if not self.redownload_running:
+                        task = asyncio.create_task(self._redownload_worker())
+                        logger.info(f"[UserCenterDownload] 已创建下载任务: {task}")
+                    self._on_back_to_home()
+                    self.tabs.setCurrentIndex(self.tabs.indexOf(self.history_tab))
+                    logger.info("[UserCenterDownload] 已切换回首页历史页")
+                except Exception:
+                    logger.exception("[UserCenterDownload] 回调执行异常")
+                    raise
 
             if self.user_center_widget is None:
                 self.user_center_widget = UserCenterDialog(web, download_callback, self)

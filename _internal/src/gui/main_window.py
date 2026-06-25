@@ -25,13 +25,20 @@ from PySide6.QtWidgets import (
     QSplitter,
     QDialog,
     QDateTimeEdit,
+    QListWidget,
+    QListWidgetItem,
+    QStackedWidget,
+    QProgressDialog,
 )
-from PySide6.QtCore import Qt, QTimer, QDateTime
+from PySide6.QtCore import Qt, QTimer, QDateTime, QSize
+from PySide6.QtGui import QIcon, QPixmap
 
 from ..config_loader import load_config, save_config
 from ..monitor import BilibiliMonitor
-from ..logger import setup_logging
+from ..logger import setup_logging, get_logger
 from .log_handler import LogEmitter, GuiLogHandler
+
+logger = get_logger(__name__)
 from .filename_template_builder import FilenameTemplateBuilder
 
 
@@ -842,8 +849,10 @@ class MainWindow(QMainWindow):
         self.instance_running = instance_running
         self.redownload_queue = []
         self.redownload_running = False
+        self.user_face_url = ""
 
         self._build_ui()
+        self._refresh_avatar()
         self._setup_logging()
 
     def _build_ui(self):
@@ -853,14 +862,26 @@ class MainWindow(QMainWindow):
 
         # 顶部标题栏 + 登录按钮
         header_layout = QHBoxLayout()
-        title_label = QLabel("Bilibili 动态监控")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.back_btn = QPushButton("< 返回")
+        self.back_btn.setStyleSheet("padding: 4px 12px;")
+        self.back_btn.clicked.connect(self._on_back_to_home)
+        self.back_btn.hide()
+        self.title_label = QLabel("Bilibili 动态监控")
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
         self.login_btn = QPushButton("扫码登录")
         self.login_btn.setStyleSheet("padding: 4px 14px;")
         self.login_btn.clicked.connect(self._on_qr_login)
-        header_layout.addWidget(title_label)
+        self.avatar_btn = QPushButton()
+        self.avatar_btn.setFixedSize(32, 32)
+        self.avatar_btn.setStyleSheet("border-radius: 16px; border: none; padding: 0px;")
+        self.avatar_btn.setCursor(Qt.PointingHandCursor)
+        self.avatar_btn.clicked.connect(self._on_open_user_center)
+        self.avatar_btn.hide()
+        header_layout.addWidget(self.back_btn)
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch()
         header_layout.addWidget(self.login_btn)
+        header_layout.addWidget(self.avatar_btn)
         layout.addLayout(header_layout)
 
         self.tabs = QTabWidget()
@@ -944,13 +965,29 @@ class MainWindow(QMainWindow):
         self.settings_tab.save_btn.clicked.connect(self._on_save_config)
         self.tabs.addTab(self.settings_tab, "设置")
 
-        layout.addWidget(self.tabs)
+        # 使用堆叠窗口实现首页和用户中心二级页面的切换
+        self.content_stack = QStackedWidget()
+        self.content_stack.addWidget(self.tabs)
+        self.user_center_widget: QWidget | None = None
+        layout.addWidget(self.content_stack)
 
     def _setup_logging(self):
         self.log_emitter = LogEmitter()
         self.log_emitter.log_signal.connect(self._append_log)
-        handler = GuiLogHandler(self.log_emitter)
-        setup_logging(level=logging.INFO, handler=handler)
+        handlers = [GuiLogHandler(self.log_emitter)]
+        # 同时写入文件，方便打包后排查问题（相对于当前工作目录，即 BASE_DIR）
+        try:
+            log_dir = os.path.join(os.getcwd(), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.FileHandler(
+                os.path.join(log_dir, "app.log"), encoding="utf-8", mode="a"
+            )
+            file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+            handlers.append(file_handler)
+        except Exception:
+            logging.exception("初始化文件日志失败")
+        for handler in handlers:
+            setup_logging(level=logging.INFO, handler=handler)
 
     def _append_log(self, msg: str):
         self.log_edit.append(msg)
@@ -1099,19 +1136,24 @@ class MainWindow(QMainWindow):
             self.failure_tab.retry_btn.setEnabled(True)
 
     async def _get_downloader(self):
+        logger.info("[GetDownloader] 开始获取下载器")
         if self.monitor and self.monitor.downloader:
+            logger.info("[GetDownloader] 使用 monitor 已有下载器")
             return self.monitor.downloader
 
         cfg = self.config_tab.get_config()
         cfg.update(self.settings_tab.get_config())
         if not cfg.get("cookie", {}).get("sessdata") or not cfg.get("cookie", {}).get("bili_jct"):
+            logger.warning("[GetDownloader] Cookie 不完整，返回 None")
             return None
 
         try:
             temp_monitor = BilibiliMonitor(cfg)
             await temp_monitor.init()
+            logger.info("[GetDownloader] 临时 monitor 初始化成功")
             return temp_monitor.downloader
         except Exception:
+            logger.exception("[GetDownloader] 临时 monitor 初始化失败")
             return None
 
     def _on_delete_failure(self):
@@ -1158,10 +1200,12 @@ class MainWindow(QMainWindow):
             asyncio.create_task(self._redownload_worker())
 
     async def _redownload_worker(self):
+        logger.info(f"[RedownloadWorker] 启动，当前队列长度: {len(self.redownload_queue)}")
         self.redownload_running = True
         try:
             while self.redownload_queue:
                 bvid, title, uname = self.redownload_queue.pop(0)
+                logger.info(f"[RedownloadWorker] 开始处理 {bvid}")
                 from ..database import DownloadDB
                 db_path = self.config.get("database", {}).get("path", "./data/downloaded.db")
                 db = DownloadDB(db_path)
@@ -1170,9 +1214,11 @@ class MainWindow(QMainWindow):
                     continue
                 try:
                     downloader = await self._get_downloader()
+                    logger.info(f"[RedownloadWorker] 获取下载器结果: {downloader is not None}")
                     if not downloader:
                         continue
                     result = await asyncio.to_thread(downloader.download, bvid, title, uname)
+                    logger.info(f"[RedownloadWorker] {bvid} 下载结果: {result}")
                     if result.get("success"):
                         self._refresh_history()
                     else:
@@ -1187,6 +1233,7 @@ class MainWindow(QMainWindow):
                     logger.error(f"[GUI] 重新下载失败 {bvid}: {e}")
         finally:
             self.redownload_running = False
+            logger.info("[RedownloadWorker] 结束")
 
     def _on_batch_delete_history(self):
         rows = self.history_tab.get_selected_rows()
@@ -1415,7 +1462,9 @@ class MainWindow(QMainWindow):
             self.batch_tab.scan_btn.setEnabled(True)
 
     def _on_batch_download(self):
+        logger.info("[BatchDownload] 点击下载选中")
         videos = self.batch_tab.get_selected_videos()
+        logger.info(f"[BatchDownload] 选中视频数量: {len(videos)}")
         if not videos:
             QMessageBox.information(self, "提示", "请先勾选要下载的视频")
             return
@@ -1423,8 +1472,11 @@ class MainWindow(QMainWindow):
             self, "确认下载",
             f"确定下载选中的 {len(videos)} 个视频吗？"
         )
+        logger.info(f"[BatchDownload] 确认框返回值: {reply} (Yes={QMessageBox.Yes})")
         if reply != QMessageBox.Yes:
+            logger.info("[BatchDownload] 用户取消或未点击是，直接返回")
             return
+        queued = 0
         for v in videos:
             bvid = v.get("bvid", "")
             title = v.get("title", "")
@@ -1438,8 +1490,15 @@ class MainWindow(QMainWindow):
                 logger.info(f"[Batch] {bvid} 已下载或已跳过，跳过")
                 continue
             self.redownload_queue.append((bvid, title, uname))
+            queued += 1
+        logger.info(f"[BatchDownload] 实际入队数量: {queued}, 队列总长度: {len(self.redownload_queue)}, worker运行中: {self.redownload_running}")
         if not self.redownload_running:
-            asyncio.create_task(self._redownload_worker())
+            try:
+                task = asyncio.create_task(self._redownload_worker())
+                logger.info(f"[BatchDownload] 已创建下载任务: {task}")
+            except Exception:
+                logger.exception("[BatchDownload] 创建下载任务失败")
+                QMessageBox.critical(self, "错误", "启动下载任务失败，请查看日志")
 
     def _on_qr_login(self):
         from .qr_login_dialog import QrLoginDialog
@@ -1454,7 +1513,106 @@ class MainWindow(QMainWindow):
             save_config(self.config)
             self.config_tab.load_config(self.config)
             self.settings_tab.load_config(self.config)
+            self._refresh_avatar()
             QMessageBox.information(self, "登录成功", "Cookie 已自动保存到配置")
+
+    def _on_open_user_center(self):
+        logging.info("[GUI] 点击头像，准备打开用户中心")
+        cfg = self.config.get("cookie", {})
+        sessdata = cfg.get("sessdata", "")
+        bili_jct = cfg.get("bili_jct", "")
+        if not sessdata or not bili_jct:
+            QMessageBox.information(self, "提示", "请先扫码登录")
+            return
+        try:
+            from ..web_client import BilibiliWebClient
+            from .user_center_dialog import UserCenterDialog
+            web = BilibiliWebClient(
+                sessdata=sessdata,
+                bili_jct=bili_jct,
+                buvid3=cfg.get("buvid3", ""),
+                dedeuserid=cfg.get("dedeuserid", ""),
+            )
+
+            def download_callback(videos: list):
+                logger.info(f"[UserCenterDownload] 回调触发，视频数量: {len(videos)}")
+                try:
+                    for v in videos:
+                        bvid = v.get("bvid", "")
+                        title = v.get("title", "")
+                        uname = v.get("uname", "")
+                        if bvid:
+                            self.redownload_queue.append((bvid, title, uname))
+                    logger.info(f"[UserCenterDownload] 入队完成，队列长度: {len(self.redownload_queue)}, worker运行中: {self.redownload_running}")
+                    if not self.redownload_running:
+                        task = asyncio.create_task(self._redownload_worker())
+                        logger.info(f"[UserCenterDownload] 已创建下载任务: {task}")
+                    self._on_back_to_home()
+                    self.tabs.setCurrentIndex(self.tabs.indexOf(self.history_tab))
+                    logger.info("[UserCenterDownload] 已切换回首页历史页")
+                except Exception:
+                    logger.exception("[UserCenterDownload] 回调执行异常")
+                    raise
+
+            if self.user_center_widget is None:
+                self.user_center_widget = UserCenterDialog(web, download_callback, self)
+                self.content_stack.addWidget(self.user_center_widget)
+            self.content_stack.setCurrentWidget(self.user_center_widget)
+            self.title_label.setText("用户中心")
+            self.back_btn.show()
+        except Exception as e:
+            logging.exception("打开用户中心失败")
+            QMessageBox.critical(self, "打开失败", f"无法打开用户中心:\n{e}")
+
+    def _on_back_to_home(self):
+        self.content_stack.setCurrentWidget(self.tabs)
+        self.title_label.setText("Bilibili 动态监控")
+        self.back_btn.hide()
+
+    def _refresh_avatar(self):
+        """根据当前配置刷新右上角头像"""
+        cfg = self.config.get("cookie", {})
+        sessdata = cfg.get("sessdata", "")
+        bili_jct = cfg.get("bili_jct", "")
+        buvid3 = cfg.get("buvid3", "")
+        dedeuserid = cfg.get("dedeuserid", "")
+        if not sessdata or not bili_jct:
+            self.avatar_btn.hide()
+            return
+        try:
+            from ..web_client import BilibiliWebClient
+            web = BilibiliWebClient(
+                sessdata=sessdata,
+                bili_jct=bili_jct,
+                buvid3=buvid3,
+                dedeuserid=dedeuserid,
+            )
+            data = web.request(
+                "https://api.bilibili.com/x/web-interface/nav",
+                referer="https://www.bilibili.com",
+            )
+            if data.get("code") == 0:
+                face_url = data["data"].get("face", "")
+                if face_url:
+                    resp = web.session.get(face_url, timeout=15)
+                    resp.raise_for_status()
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(resp.content)
+                    if not pixmap.isNull():
+                        scaled = pixmap.scaled(
+                            32, 32, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                        )
+                        self.avatar_btn.setIcon(QIcon(scaled))
+                        self.avatar_btn.setIconSize(QSize(32, 32))
+                        self.avatar_btn.setToolTip("点击打开用户中心")
+                        self.avatar_btn.show()
+                        self.login_btn.hide()
+                        self.user_face_url = face_url
+                        return
+        except Exception as e:
+            logging.warning(f"[GUI] 刷新头像失败: {e}")
+        self.avatar_btn.hide()
+        self.login_btn.show()
 
     def closeEvent(self, event):
         from PySide6.QtWidgets import QApplication

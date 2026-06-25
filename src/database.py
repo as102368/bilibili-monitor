@@ -111,6 +111,7 @@ class DownloadDB:
                 title TEXT,
                 uploader TEXT,
                 file_name TEXT,
+                file_path TEXT,
                 file_size INTEGER,
                 status TEXT,
                 message TEXT,
@@ -119,6 +120,14 @@ class DownloadDB:
             """
         )
         self.conn.commit()
+        self._migrate_add_file_path_column()
+
+    def _migrate_add_file_path_column(self):
+        try:
+            self.conn.execute("ALTER TABLE uploads ADD COLUMN file_path TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     def add_upload_record(
         self,
@@ -129,14 +138,72 @@ class DownloadDB:
         file_size: int,
         status: str,
         message: str = "",
+        file_path: str = "",
     ):
         self.conn.execute(
             """
             INSERT INTO uploads
-            (bvid, title, uploader, file_name, file_size, status, message, uploaded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (bvid, title, uploader, file_name, file_path, file_size, status, message, uploaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (bvid, title, uploader, file_name, file_size, status, message, _format_ts()),
+            (bvid, title, uploader, file_name, file_path, file_size, status, message, _format_ts()),
+        )
+        self.conn.commit()
+
+    def add_pending_upload(
+        self,
+        file_path: str,
+        bvid: str,
+        title: str,
+        uploader: str,
+        file_size: int,
+    ) -> int:
+        file_name = os.path.basename(file_path)
+        cur = self.conn.execute(
+            """
+            INSERT INTO uploads
+            (bvid, title, uploader, file_name, file_path, file_size, status, message, uploaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (bvid, title, uploader, file_name, file_path, file_size, "pending", "", _format_ts()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_pending_uploads(self, limit: int = 10) -> list:
+        cur = self.conn.execute(
+            """
+            SELECT id, bvid, title, uploader, file_name, file_path, file_size, uploaded_at
+            FROM uploads
+            WHERE status = 'pending'
+            ORDER BY uploaded_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "id": row[0],
+                "bvid": row[1],
+                "title": row[2],
+                "uploader": row[3],
+                "file_name": row[4],
+                "file_path": row[5],
+                "file_size": row[6],
+                "uploaded_at": row[7],
+            })
+        return result
+
+    def count_pending_uploads(self) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) FROM uploads WHERE status = 'pending'")
+        return cur.fetchone()[0]
+
+    def update_upload_status(self, record_id: int, status: str, message: str = ""):
+        self.conn.execute(
+            "UPDATE uploads SET status = ?, message = ?, uploaded_at = ? WHERE id = ?",
+            (status, message, _format_ts(), record_id),
         )
         self.conn.commit()
 

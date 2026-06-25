@@ -1,13 +1,13 @@
-from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
-    QPushButton,
-    QLabel,
-    QComboBox,
-)
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class FilenameTemplateBuilder(QWidget):

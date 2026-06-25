@@ -1,16 +1,16 @@
-import requests
 import qrcode
+import requests
 from PIL.ImageQt import ImageQt
-from PySide6.QtWidgets import (
-    QDialog,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QMessageBox,
-)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+)
 
 
 class QrLoginDialog(QDialog):

@@ -323,7 +323,8 @@ class Downloader:
         2. 获取 playurl (DASH 直链)
         3. 下载视频流 + 音频流
         4. FFmpeg 合并
-        返回 {"success": bool, "quality": str}
+        返回 {"success": bool, "quality": str, "output_path": str}
+        上传逻辑已解耦到 UploadManager，由调用方在下载成功后自行入队。
         """
         # 1. 获取视频详情
         info = self.video_stream.get_video_info(bvid)
@@ -472,26 +473,5 @@ class Downloader:
                 self._record_failure(bvid, title, uname, reason)
                 return {"success": False, "quality": quality_str, "reason": reason}
 
-        # 上传至城通网盘并删除源文件
-        if success and self.ctfile_uploader:
-            import os as _os
-            file_size = _os.path.getsize(output_path) if _os.path.exists(output_path) else 0
-            upload_ok = self.ctfile_uploader.upload_and_delete(output_path)
-            if self.db:
-                status = "success" if upload_ok else "failed"
-                message = "上传并删除本地文件成功" if upload_ok else "上传失败或校验未通过，保留本地文件"
-                self.db.add_upload_record(
-                    bvid=bvid,
-                    title=title,
-                    uploader=uname,
-                    file_name=_os.path.basename(output_path),
-                    file_size=file_size,
-                    status=status,
-                    message=message,
-                )
-            if not upload_ok:
-                reason = "城通网盘上传失败（上传接口异常或校验未通过）"
-                self._record_failure(bvid, title, uname, reason)
-                return {"success": False, "quality": quality_str, "reason": reason}
-
-        return {"success": True, "quality": quality_str}
+        # 下载完成后返回本地文件路径，上传由 UploadManager 异步批量处理
+        return {"success": True, "quality": quality_str, "output_path": output_path}

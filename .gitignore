@@ -8,13 +8,18 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+_internal/
 .eggs/
 
 config.yaml
 cookies.json
 data/
 downloads/
+logs/
 
 *.log
 .vscode/
 .idea/
+
+# PyInstaller one-file or one-dir artifacts in project root
+bilibili-monitor.exe

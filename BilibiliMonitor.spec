@@ -21,6 +21,7 @@ a = Analysis(
         'src.video_stream',
         'src.wbi',
         'src.ctfile_uploader',
+        'src.upload_manager',
         'src.config_loader',
         'src.logger',
         'src.gui.log_handler',

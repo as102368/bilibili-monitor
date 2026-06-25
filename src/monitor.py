@@ -11,6 +11,7 @@ from .downloader import Downloader
 from .web_client import BilibiliWebClient
 from .video_stream import VideoStream
 from .ctfile_uploader import CtfileUploader
+from .upload_manager import UploadManager
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -55,6 +56,10 @@ class BilibiliMonitor:
             index_format=config["download"].get("index_format", "自然数"),
         )
 
+        # 上传管理器：与下载解耦，扫描下载目录满 10 个一批上传
+        download_dir = config["download"].get("output_dir", "./downloads")
+        self.upload_manager = UploadManager(download_dir, config["database"]["path"], ctfile_uploader)
+
         self.scheduler = AsyncIOScheduler()
         concurrent = max(1, min(5, config["download"].get("concurrent_downloads", 2)))
         self._download_sem = asyncio.Semaphore(concurrent)
@@ -74,6 +79,7 @@ class BilibiliMonitor:
 
     async def init(self):
         await asyncio.to_thread(self._sync_auth_check)
+        await self.upload_manager.start_worker()
         logger.info("[Monitor] 初始化完成，准备通过动态流监控视频投稿")
 
     async def _fetch_dynamic_videos(self) -> List[Dict]:
@@ -121,6 +127,28 @@ class BilibiliMonitor:
             result = await asyncio.to_thread(self.downloader.download, bvid, title, uname)
         return result
 
+    async def _download_and_track(self, bvid: str, title: str, uname: str, mid: int, stagger_delay: float):
+        """下载单个视频并在成功后入队上传；异常或失败均记录到失败表。"""
+        try:
+            result = await self._throttled_download(bvid, title, uname, stagger_delay)
+        except Exception as e:
+            logger.error(f"[Monitor] 下载异常 {bvid}: {e}")
+            return
+
+        if not isinstance(result, dict):
+            logger.error(f"[Monitor] 下载返回异常 {bvid}: {result}")
+            return
+
+        if result.get("success"):
+            self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
+            logger.info(f"[Done] {bvid} 下载完成，上传由 UploadManager 扫描目录自动处理")
+        else:
+            reason = result.get("reason", "")
+            if "充电专属" in reason:
+                logger.info(f"[Monitor] {bvid} 为充电专属视频，跳过")
+            else:
+                logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试: {reason}")
+
     async def check_all(self):
         try:
             items = await self._fetch_dynamic_videos()
@@ -148,12 +176,12 @@ class BilibiliMonitor:
         # 限制本次同时下载的数量
         new_videos = new_videos[:page_size]
 
-        # 错峰启动：每个视频间隔 4~6 秒，避免同时请求 playurl 触发 412
-        tasks = []
+        # 扫描到新视频后立即后台下载，不等待下载/上传完成
         for idx, video in enumerate(new_videos):
             bvid = video["bvid"]
             title = video["title"]
             uname = video["uname"]
+            mid = video["mid"]
 
             # 检查失败重试次数
             failure_info = self.db.get_pending_failure_info(bvid)
@@ -172,44 +200,7 @@ class BilibiliMonitor:
 
             logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
             delay = idx * random.uniform(4, 6)
-            task = asyncio.create_task(
-                self._throttled_download(bvid, title, uname, delay)
-            )
-            tasks.append((task, bvid, title, uname, video["mid"]))
-
-        results = await asyncio.gather(*[t[0] for t in tasks], return_exceptions=True)
-
-        new_count = 0
-        ctfile_retry_tasks = []
-        for (task, bvid, title, uname, mid), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                logger.error(f"[Monitor] 下载异常 {bvid}: {result}")
-                continue
-            if result.get("success"):
-                self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
-                logger.info(f"[Done] {bvid} 下载完成")
-                new_count += 1
-            else:
-                reason = result.get("reason", "")
-                if "城通网盘上传失败" in reason:
-                    logger.warning(f"[Monitor] {bvid} 城通网盘上传失败，10 秒后自动重试")
-                    ctfile_retry_tasks.append(asyncio.create_task(self._retry_ctfile_upload(bvid, title, uname, mid)))
-                else:
-                    logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试")
-
-        if ctfile_retry_tasks:
-            await asyncio.gather(*ctfile_retry_tasks, return_exceptions=True)
-
-    async def _retry_ctfile_upload(self, bvid: str, title: str, uname: str, mid: int):
-        """城通网盘上传失败后等待 10 秒重新下载并上传"""
-        await asyncio.sleep(10)
-        async with self._download_sem:
-            result = await asyncio.to_thread(self.downloader.download, bvid, title, uname)
-        if result.get("success"):
-            self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
-            logger.info(f"[Retry-Done] {bvid} 重试下载上传完成")
-        else:
-            logger.warning(f"[Retry-Fail] {bvid} 重试仍然失败: {result.get('reason', '')}")
+            asyncio.create_task(self._download_and_track(bvid, title, uname, mid, delay))
 
     async def fetch_dynamics_in_range(self, start_ts: int, end_ts: int) -> List[Dict]:
         """分页获取指定时间段内的动态视频（时间倒序）"""
