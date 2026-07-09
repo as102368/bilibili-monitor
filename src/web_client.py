@@ -3,6 +3,8 @@ import urllib.parse
 from typing import Optional, Dict, Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .logger import get_logger
 
@@ -44,6 +46,18 @@ class BilibiliWebClient:
         # 使用 Session 复用 TCP 连接（仿照 SocketsHttpHandler 连接池）
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
+
+        # 为 Session 挂载重试适配器，缓解 SSL EOF / 连接重置等瞬时网络问题
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
         # 若未提供 buvid3，自动从 B 站获取设备指纹
         if not self._buvid3:
@@ -145,3 +159,72 @@ class BilibiliWebClient:
     def get_cookie_string(self) -> str:
         """供外部组件获取 Cookie 字符串"""
         return "; ".join(f"{k}={v}" for k, v in self._build_cookies().items())
+
+    def _get_default_fav_folder_id(self) -> Optional[int]:
+        """获取用户默认收藏夹 media_id，首次调用后缓存。"""
+        if getattr(self, "_default_fav_media_id", None):
+            return self._default_fav_media_id
+        mid = self.dedeuserid
+        if not mid:
+            return None
+        try:
+            resp = self.request(
+                "https://api.bilibili.com/x/v3/fav/folder/created/list-all",
+                params={"up_mid": mid},
+            )
+            if resp.get("code") == 0:
+                folders = resp.get("data", {}).get("list", [])
+                if folders:
+                    # 默认收藏夹通常是第一个
+                    self._default_fav_media_id = folders[0].get("id")
+                    return self._default_fav_media_id
+        except Exception as e:
+            logger.warning(f"[WebClient] 获取默认收藏夹失败: {e}")
+        return None
+
+    def add_to_favorite(self, aid: int, media_id: Optional[int] = None) -> bool:
+        """将稿件添加到收藏夹。media_id 为空时使用默认收藏夹。"""
+        if not media_id:
+            media_id = self._get_default_fav_folder_id()
+        if not media_id:
+            logger.warning("[WebClient] 无法获取默认收藏夹 media_id")
+            return False
+
+        url = "https://api.bilibili.com/x/v3/fav/resource/deal"
+        data = {
+            "rid": aid,
+            "type": 2,
+            "add_media_ids": str(media_id),
+            "del_media_ids": "",
+            "csrf": self.bili_jct,
+            "platform": "web",
+            "eavp": "",
+            "fp": "",
+            "jsonp": "jsonp",
+        }
+        try:
+            cookies = self._build_cookies()
+            headers = {
+                "Referer": "https://www.bilibili.com",
+                "Origin": "https://www.bilibili.com",
+            }
+            resp = self.session.post(
+                url,
+                data=data,
+                headers=headers,
+                cookies=cookies,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("code") == 0:
+                logger.info(f"[WebClient] 成功收藏 aid={aid} 到收藏夹 {media_id}")
+                return True
+            logger.warning(
+                f"[WebClient] 收藏 aid={aid} 失败: code={result.get('code')}, "
+                f"msg={result.get('message', '')}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"[WebClient] 收藏请求异常 aid={aid}: {e}")
+            return False

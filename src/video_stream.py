@@ -19,9 +19,12 @@ class VideoStream:
         self.last_playurl_error: Optional[Dict[str, Any]] = None
         self.last_video_info_error: Optional[Dict[str, Any]] = None
 
-    def get_playurl(self, bvid: str, cid: int, qn: int = 125) -> Optional[Dict[str, Any]]:
+    def get_playurl(
+        self, bvid: str, cid: int, qn: int = 125, fnval: int = 4048
+    ) -> Optional[Dict[str, Any]]:
         """
-        获取视频播放地址（DASH 格式）。
+        获取视频播放地址。
+        默认 fnval=4048 请求 DASH 格式；可传入其它 fnval 获取 FLV/MP4 等单文件流。
         仿照 DownKyi VideoStream.GetVideoPlayUrl()
         """
         params = {
@@ -30,7 +33,7 @@ class VideoStream:
             "qn": qn,
             "fourk": 1,
             "fnver": 0,
-            "fnval": 4048,  # 请求 DASH 格式
+            "fnval": fnval,
             "platform": "web",
         }
         # 8K 需要额外参数
@@ -50,6 +53,13 @@ class VideoStream:
             return None
         self.last_playurl_error = None
         return data.get("data")
+
+    def get_playurl_preview(self, bvid: str, cid: int, qn: int = 125) -> Optional[Dict[str, Any]]:
+        """
+        获取试看/预览流播放地址（FLV/durl 单文件格式）。
+        对未充电账号的充电视频，B 站有时会通过该格式返回前几分钟试看流。
+        """
+        return self.get_playurl(bvid, cid, qn=qn, fnval=0)
 
     def get_video_info(self, bvid: str) -> Optional[Dict[str, Any]]:
         """

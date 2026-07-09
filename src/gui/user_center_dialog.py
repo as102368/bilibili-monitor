@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QWidget,
+    QSizePolicy,
     QLabel,
     QPushButton,
     QListWidget,
@@ -21,13 +22,12 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
     QStackedWidget,
-    QProgressDialog,
     QCheckBox,
     QSplitter,
     QTextEdit,
 )
 from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QPainterPath
 
 from ..logger import get_logger
 from ..wbi import WBI
@@ -45,10 +45,13 @@ def _ts_to_str(ts: int) -> str:
 
 
 def _get_video_status(db: DownloadDB, bvid: str) -> str:
-    """返回视频在本地数据库中的状态：已存档 / 失败原因 / 空"""
+    """返回视频在本地数据库中的状态：已存档 / 已存档（试看） / 失败原因 / 空"""
     if not bvid:
         return ""
     if db.is_downloaded(bvid):
+        downloaded = db.get_downloaded_by_bvid(bvid)
+        if downloaded and downloaded.get("is_preview"):
+            return "已存档（试看）"
         return "已存档"
     failure = db.get_failure_by_bvid(bvid)
     if failure:
@@ -66,13 +69,23 @@ def _get_video_status(db: DownloadDB, bvid: str) -> str:
 class UserCenterDialog(QWidget):
     """用户中心页面（嵌入主窗口使用）"""
 
-    def __init__(self, web_client, db_path: str, download_callback: Callable[[List[Dict]], None], parent=None):
+    def __init__(
+        self,
+        web_client,
+        db_path: str,
+        download_callback: Callable[[List[Dict]], None],
+        parent=None,
+        download_all_callback: Optional[Callable[[List[Dict]], None]] = None,
+    ):
         super().__init__(parent)
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1280, 800)
+        self.resize(1400, 850)
         self.web = web_client
+        self.wbi = WBI(web_client.sessdata)
         self.db_path = db_path
         self.db = DownloadDB(db_path)
         self.download_callback = download_callback
+        self.download_all_callback = download_all_callback
         self.user_info: Dict = {}
         self.current_videos: List[Dict] = []
         self.user_mid: int = 0
@@ -91,9 +104,11 @@ class UserCenterDialog(QWidget):
         left_layout.setContentsMargins(8, 8, 8, 8)
 
         self.avatar_label = QLabel()
-        self.avatar_label.setFixedSize(64, 64)
+        self.avatar_label.setFixedSize(72, 72)
         self.avatar_label.setAlignment(Qt.AlignCenter)
-        self.avatar_label.setStyleSheet("border-radius: 32px; border: 1px solid #ddd;")
+        self.avatar_label.setStyleSheet(
+            "QLabel { border: 2px solid #4a4a4a; border-radius: 36px; background-color: #2a2a2a; }"
+        )
         left_layout.addWidget(self.avatar_label, alignment=Qt.AlignCenter)
 
         self.uname_label = QLabel("未登录")
@@ -146,80 +161,168 @@ class UserCenterDialog(QWidget):
     def _build_follow_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
+        # 顶部标题栏
         top = QHBoxLayout()
-        top.addWidget(QLabel("我的关注"))
+        title = QLabel("我的关注")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        top.addWidget(title)
         top.addStretch()
+        self.follow_count_label = QLabel("共 0 位 UP主")
+        self.follow_count_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        top.addWidget(self.follow_count_label)
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setMinimumHeight(32)
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #4a4a4a; }"
+        )
         refresh_btn.clicked.connect(self._load_followings)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
+        # 关注表格：仅保留 复选框 / 昵称 / 操作
         self.follow_table = QTableWidget()
-        self.follow_table.setColumnCount(4)
-        self.follow_table.setHorizontalHeaderLabels(["", "昵称", "签名", "操作"])
-        self.follow_table.setColumnWidth(0, 30)
-        self.follow_table.setColumnWidth(1, 160)
-        self.follow_table.setColumnWidth(2, 360)
-        self.follow_table.setColumnWidth(3, 80)
+        self.follow_table.setColumnCount(3)
+        self.follow_table.setHorizontalHeaderLabels(["", "昵称", "操作"])
         self.follow_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.follow_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.follow_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.follow_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.follow_table)
+        self.follow_table.setStyleSheet(
+            "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
+            "QTableWidget::item { padding: 6px; color: #eeeeee; }"
+            "QTableWidget::item:selected { background-color: #1E88E5; }"
+        )
+        follow_header = self.follow_table.horizontalHeader()
+        follow_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        follow_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        follow_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        follow_header.setDefaultAlignment(Qt.AlignLeft)
+        self.follow_table.setColumnWidth(0, 50)
+        self.follow_table.setColumnWidth(2, 90)
+        self.follow_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.follow_table, 1)
 
-        btn_layout = QHBoxLayout()
+        # 底部操作栏：固定高度，防止被压缩
+        bottom = QWidget()
+        bottom.setMinimumHeight(60)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bottom.setStyleSheet(
+            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
+            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        bottom_layout = QHBoxLayout(bottom)
+        bottom_layout.setContentsMargins(14, 10, 14, 10)
         self.follow_select_all = QCheckBox("全选")
         self.follow_select_all.clicked.connect(self._on_follow_select_all)
-        btn_layout.addWidget(self.follow_select_all)
-        btn_layout.addStretch()
-        download_btn = QPushButton("批量下载选中UP主的全部视频")
+        bottom_layout.addWidget(self.follow_select_all)
+        bottom_layout.addStretch()
+        self.follow_selected_count = QLabel("已选 0 位")
+        self.follow_selected_count.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        bottom_layout.addWidget(self.follow_selected_count)
+        bottom_layout.addSpacing(12)
+        download_btn = QPushButton("下载选中UP主的全部视频")
+        download_btn.setMinimumHeight(38)
+        download_btn.setMinimumWidth(220)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:pressed { background-color: #1565C0; }"
+            "QPushButton:disabled { background-color: #555; color: #aaa; }"
+        )
         download_btn.clicked.connect(self._on_download_selected_follows)
-        btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
+        bottom_layout.addWidget(download_btn)
+        layout.addWidget(bottom)
+
+        # 选中变化时更新计数（行拖拽 + 复选框点击）
+        self.follow_table.itemSelectionChanged.connect(self._update_follow_selection_count)
+        self.follow_table.itemChanged.connect(self._update_follow_selection_count)
 
         return page
 
     def _build_group_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("关注分组"))
+        title = QLabel("关注分组")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        top.addWidget(title)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setMinimumHeight(32)
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #4a4a4a; }"
+        )
         refresh_btn.clicked.connect(self._load_follow_groups)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
         self.group_list = QListWidget()
+        self.group_list.setMaximumHeight(160)
+        self.group_list.setStyleSheet(
+            "QListWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; color: #eeeeee; }"
+            "QListWidget::item { padding: 8px; border-bottom: 1px solid #333; }"
+            "QListWidget::item:selected { background-color: #1E88E5; }"
+        )
         self.group_list.itemClicked.connect(self._on_group_selected)
-        layout.addWidget(self.group_list, 1)
+        layout.addWidget(self.group_list)
 
         self.group_member_table = QTableWidget()
-        self.group_member_table.setColumnCount(4)
-        self.group_member_table.setHorizontalHeaderLabels(["", "昵称", "签名", "操作"])
-        self.group_member_table.setColumnWidth(0, 30)
-        self.group_member_table.setColumnWidth(1, 160)
-        self.group_member_table.setColumnWidth(2, 360)
-        self.group_member_table.setColumnWidth(3, 80)
+        self.group_member_table.setColumnCount(3)
+        self.group_member_table.setHorizontalHeaderLabels(["", "昵称", "操作"])
         self.group_member_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.group_member_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.group_member_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.group_member_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.group_member_table, 2)
+        self.group_member_table.setStyleSheet(
+            "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
+            "QTableWidget::item { padding: 6px; color: #eeeeee; }"
+            "QTableWidget::item:selected { background-color: #1E88E5; }"
+        )
+        group_header = self.group_member_table.horizontalHeader()
+        group_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        group_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        group_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.group_member_table.setColumnWidth(0, 50)
+        self.group_member_table.setColumnWidth(2, 90)
+        self.group_member_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.group_member_table, 1)
 
-        btn_layout = QHBoxLayout()
+        bottom = QWidget()
+        bottom.setMinimumHeight(60)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bottom.setStyleSheet(
+            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
+            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        btn_layout = QHBoxLayout(bottom)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
         self.group_select_all = QCheckBox("全选")
         self.group_select_all.clicked.connect(self._on_group_select_all)
         btn_layout.addWidget(self.group_select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中UP主的全部视频")
+        download_btn.setMinimumHeight(38)
+        download_btn.setMinimumWidth(240)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:pressed { background-color: #1565C0; }"
+        )
         download_btn.clicked.connect(self._on_download_selected_group_members)
         btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
+        layout.addWidget(bottom)
 
         return page
 
@@ -243,17 +346,23 @@ class UserCenterDialog(QWidget):
         self.fav_video_table = QTableWidget()
         self.fav_video_table.setColumnCount(7)
         self.fav_video_table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
+        self.fav_video_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.fav_video_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.fav_video_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        fav_header = self.fav_video_table.horizontalHeader()
+        fav_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        fav_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        fav_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        fav_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        fav_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        fav_header.setSectionResizeMode(5, QHeaderView.Interactive)
+        fav_header.setSectionResizeMode(6, QHeaderView.Fixed)
         self.fav_video_table.setColumnWidth(0, 30)
         self.fav_video_table.setColumnWidth(1, 100)
-        self.fav_video_table.setColumnWidth(2, 240)
         self.fav_video_table.setColumnWidth(3, 120)
         self.fav_video_table.setColumnWidth(4, 150)
         self.fav_video_table.setColumnWidth(5, 100)
         self.fav_video_table.setColumnWidth(6, 80)
-        self.fav_video_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.fav_video_table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.fav_video_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.fav_video_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.fav_video_table, 2)
 
         btn_layout = QHBoxLayout()
@@ -285,17 +394,23 @@ class UserCenterDialog(QWidget):
         table = QTableWidget()
         table.setColumnCount(7)
         table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "时间", "状态", "操作"])
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.ExtendedSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        v_header = table.horizontalHeader()
+        v_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        v_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        v_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        v_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        v_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        v_header.setSectionResizeMode(5, QHeaderView.Interactive)
+        v_header.setSectionResizeMode(6, QHeaderView.Fixed)
         table.setColumnWidth(0, 30)
         table.setColumnWidth(1, 100)
-        table.setColumnWidth(2, 260)
         table.setColumnWidth(3, 120)
         table.setColumnWidth(4, 150)
         table.setColumnWidth(5, 100)
         table.setColumnWidth(6, 80)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.ExtendedSelection)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table, 2)
 
         btn_layout = QHBoxLayout()
@@ -342,6 +457,9 @@ class UserCenterDialog(QWidget):
         self.sub_select_all.clicked.connect(self._on_sub_select_all)
         btn_layout.addWidget(self.sub_select_all)
         btn_layout.addStretch()
+        download_btn = QPushButton("批量下载选中订阅")
+        download_btn.clicked.connect(self._on_download_selected_subscriptions)
+        btn_layout.addWidget(download_btn)
         layout.addLayout(btn_layout)
 
         return page
@@ -353,6 +471,32 @@ class UserCenterDialog(QWidget):
         item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
         item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         table.setItem(row, col, item)
+
+    @staticmethod
+    def _make_round_avatar(pixmap: QPixmap, size: int) -> QPixmap:
+        """将方形头像裁剪为圆形"""
+        if pixmap.isNull():
+            return pixmap
+        scaled = pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        rounded = QPixmap(size, size)
+        rounded.fill(Qt.transparent)
+        painter = QPainter(rounded)
+        painter.setRenderHint(QPainter.Antialiasing)
+        path = QPainterPath()
+        path.addEllipse(0, 0, size, size)
+        painter.setClipPath(path)
+        # 居中绘制
+        x = (size - scaled.width()) // 2
+        y = (size - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+        return rounded
+
+    def _update_follow_selection_count(self):
+        """更新关注页选中计数"""
+        rows = self._get_table_selected_rows(self.follow_table)
+        count = len(rows)
+        self.follow_selected_count.setText(f"已选 {count} 位")
 
     def _on_table_select_all(self, table: QTableWidget, checked: bool):
         for row in range(table.rowCount()):
@@ -374,7 +518,7 @@ class UserCenterDialog(QWidget):
 
     def _open_up_videos(self, mid: int, uname: str):
         """打开 UP 主视频列表弹窗"""
-        dialog = UpVideoDialog(self.web, mid, uname, self.db_path, self.download_callback, self)
+        dialog = UpVideoDialog(self.web, mid, uname, self.db_path, self.download_callback, self, wbi=self.wbi)
         dialog.exec()
 
     def _open_fav_videos(self, media_id: int, title: str):
@@ -385,8 +529,12 @@ class UserCenterDialog(QWidget):
     # ---------- 数据加载 ----------
 
     def _load_user_info(self):
+        asyncio.create_task(self._load_user_info_async())
+
+    async def _load_user_info_async(self):
         try:
-            data = self.web.request(
+            data = await asyncio.to_thread(
+                self.web.request,
                 "https://api.bilibili.com/x/web-interface/nav",
                 referer="https://www.bilibili.com",
             )
@@ -397,44 +545,54 @@ class UserCenterDialog(QWidget):
                 self.uname_label.setText(info.get("uname", "未登录"))
                 face_url = info.get("face", "")
                 if face_url:
-                    resp = self.web.session.get(face_url, timeout=15)
+                    resp = await asyncio.to_thread(self.web.session.get, face_url, timeout=15)
                     resp.raise_for_status()
                     pixmap = QPixmap()
                     pixmap.loadFromData(resp.content)
                     if not pixmap.isNull():
-                        scaled = pixmap.scaled(
-                            64, 64, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-                        )
-                        self.avatar_label.setPixmap(scaled)
+                        rounded = self._make_round_avatar(pixmap, 72)
+                        self.avatar_label.setPixmap(rounded)
                 # 获取到用户信息后再加载关注列表，确保 mid 已就绪
                 self._load_followings()
         except Exception as e:
             logger.warning(f"[UserCenter] 获取用户信息失败: {e}")
 
     def _load_followings(self):
+        asyncio.create_task(self._load_followings_async())
+
+    async def _load_followings_async(self):
         self.follow_table.setRowCount(0)
         try:
             vmid = self.user_mid or int(self.web.dedeuserid or 0)
-            followings = fetch_followings(self.web, vmid=vmid)
+            followings = await asyncio.to_thread(fetch_followings, self.web, vmid=vmid)
             self.follow_table.setRowCount(len(followings))
             for i, f in enumerate(followings):
                 self._set_checkable_item(self.follow_table, i, 0)
                 mid = f.get("mid", 0)
                 uname = f.get("uname", "")
                 self.follow_table.setItem(i, 1, QTableWidgetItem(uname))
-                self.follow_table.setItem(i, 2, QTableWidgetItem(f.get("sign", "")))
                 # 将 mid 存入行数据，避免展示 UID
                 self.follow_table.item(i, 1).setData(Qt.UserRole, mid)
                 btn = QPushButton("查看")
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #424242; color: white; border-radius: 4px; padding: 2px 10px; }"
+                    "QPushButton:hover { background-color: #555555; }"
+                )
+                btn.setCursor(Qt.PointingHandCursor)
                 btn.clicked.connect(lambda _, m=mid, u=uname: self._open_up_videos(m, u))
-                self.follow_table.setCellWidget(i, 3, btn)
+                self.follow_table.setCellWidget(i, 2, btn)
+            self.follow_count_label.setText(f"共 {len(followings)} 位 UP主")
+            self._update_follow_selection_count()
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取关注列表失败: {e}")
 
     def _load_follow_groups(self):
+        asyncio.create_task(self._load_follow_groups_async())
+
+    async def _load_follow_groups_async(self):
         self.group_list.clear()
         try:
-            groups = fetch_follow_groups(self.web)
+            groups = await asyncio.to_thread(fetch_follow_groups, self.web)
             for g in groups:
                 item = QListWidgetItem(f"{g.get('name', '')} ({g.get('count', 0)})")
                 item.setData(Qt.UserRole, g.get("tagid", 0))
@@ -443,29 +601,39 @@ class UserCenterDialog(QWidget):
             QMessageBox.critical(self, "加载失败", f"获取关注分组失败: {e}")
 
     def _on_group_selected(self, item: QListWidgetItem):
+        asyncio.create_task(self._on_group_selected_async(item))
+
+    async def _on_group_selected_async(self, item: QListWidgetItem):
         tagid = item.data(Qt.UserRole)
         self.group_member_table.setRowCount(0)
         try:
-            members = fetch_group_members(self.web, tagid)
+            members = await asyncio.to_thread(fetch_group_members, self.web, tagid)
             self.group_member_table.setRowCount(len(members))
             for i, f in enumerate(members):
                 self._set_checkable_item(self.group_member_table, i, 0)
                 mid = f.get("mid", 0)
                 uname = f.get("uname", "")
                 self.group_member_table.setItem(i, 1, QTableWidgetItem(uname))
-                self.group_member_table.setItem(i, 2, QTableWidgetItem(f.get("sign", "")))
                 self.group_member_table.item(i, 1).setData(Qt.UserRole, mid)
                 btn = QPushButton("查看")
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #424242; color: white; border-radius: 4px; padding: 2px 10px; }"
+                    "QPushButton:hover { background-color: #555555; }"
+                )
+                btn.setCursor(Qt.PointingHandCursor)
                 btn.clicked.connect(lambda _, m=mid, u=uname: self._open_up_videos(m, u))
-                self.group_member_table.setCellWidget(i, 3, btn)
+                self.group_member_table.setCellWidget(i, 2, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取分组成员失败: {e}")
 
     def _load_fav_folders(self):
+        asyncio.create_task(self._load_fav_folders_async())
+
+    async def _load_fav_folders_async(self):
         self.fav_list.clear()
         try:
             up_mid = self.user_mid or int(self.web.dedeuserid or 0)
-            folders = fetch_fav_folders(self.web, up_mid=up_mid)
+            folders = await asyncio.to_thread(fetch_fav_folders, self.web, up_mid=up_mid)
             for f in folders:
                 item = QListWidgetItem(f"{f.get('title', '')} ({f.get('media_count', 0)})")
                 item.setData(Qt.UserRole, f.get("id", 0))
@@ -479,15 +647,19 @@ class UserCenterDialog(QWidget):
         title = item.data(Qt.UserRole + 1)
         self._open_fav_videos(media_id, title)
 
-    def _on_video_page_refresh(self):
-        sender = self.sender()
-        page_type = sender.property("page_type") if sender else ""
+    def _on_video_page_refresh(self, page_type: str = ""):
+        asyncio.create_task(self._on_video_page_refresh_async(page_type))
+
+    async def _on_video_page_refresh_async(self, page_type: str = ""):
+        if not page_type:
+            sender = self.sender()
+            page_type = sender.property("page_type") if sender else ""
         try:
             if page_type == "稍后再看":
-                videos = fetch_watchlater(self.web)
+                videos = await asyncio.to_thread(fetch_watchlater, self.web)
                 self._fill_video_table(self.watchlater_page.findChild(QTableWidget), videos)
             elif page_type == "历史记录":
-                videos = fetch_history(self.web)
+                videos = await asyncio.to_thread(fetch_history, self.web)
                 self._fill_video_table(self.history_page.findChild(QTableWidget), videos)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取{page_type}失败: {e}")
@@ -510,15 +682,28 @@ class UserCenterDialog(QWidget):
             table.setCellWidget(i, 6, btn)
 
     def _load_subscriptions(self):
+        asyncio.create_task(self._load_subscriptions_async())
+
+    async def _load_subscriptions_async(self):
         self.sub_table.setRowCount(0)
         try:
-            subs = fetch_subscriptions(self.web)
+            subs = await asyncio.to_thread(fetch_subscriptions, self.web)
             self.sub_table.setRowCount(len(subs))
             for i, s in enumerate(subs):
                 self._set_checkable_item(self.sub_table, i, 0)
-                self.sub_table.setItem(i, 1, QTableWidgetItem(str(s.get("id", ""))))
-                self.sub_table.setItem(i, 2, QTableWidgetItem(s.get("title", "")))
+                sid = s.get("id", "")
+                title = s.get("title", "")
+                self.sub_table.setItem(i, 1, QTableWidgetItem(str(sid)))
+                self.sub_table.setItem(i, 2, QTableWidgetItem(title))
                 self.sub_table.setItem(i, 3, QTableWidgetItem(s.get("type", "")))
+                btn = QPushButton("下载")
+                btn.setStyleSheet(
+                    "QPushButton { background-color: #424242; color: white; border-radius: 4px; padding: 2px 10px; }"
+                    "QPushButton:hover { background-color: #555555; }"
+                )
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.clicked.connect(lambda _, s=sid, t=title: self._on_download_subscription(s, t))
+                self.sub_table.setCellWidget(i, 4, btn)
         except Exception as e:
             QMessageBox.critical(self, "加载失败", f"获取订阅失败: {e}")
 
@@ -535,16 +720,17 @@ class UserCenterDialog(QWidget):
         elif index == 3:
             table = self.watchlater_page.findChild(QTableWidget)
             if table and table.rowCount() == 0:
-                self._on_video_page_refresh()
+                self._on_video_page_refresh("稍后再看")
         elif index == 4:
             table = self.history_page.findChild(QTableWidget)
             if table and table.rowCount() == 0:
-                self._on_video_page_refresh()
+                self._on_video_page_refresh("历史记录")
         elif index == 5 and self.sub_table.rowCount() == 0:
             self._load_subscriptions()
 
     def _on_follow_select_all(self, checked: bool):
         self._on_table_select_all(self.follow_table, checked)
+        self._update_follow_selection_count()
 
     def _on_group_select_all(self, checked: bool):
         self._on_table_select_all(self.group_member_table, checked)
@@ -571,8 +757,8 @@ class UserCenterDialog(QWidget):
                 up_list.append({"mid": mid, "uname": uname})
         if not up_list:
             return
-        dialog = MultiUpDownloadDialog(self.web, up_list, self.db_path, self.download_callback, self)
-        dialog.exec()
+        if self.download_all_callback:
+            self.download_all_callback(up_list)
 
     def _on_download_selected_group_members(self):
         rows = self._get_table_selected_rows(self.group_member_table)
@@ -587,8 +773,62 @@ class UserCenterDialog(QWidget):
                 up_list.append({"mid": mid, "uname": uname})
         if not up_list:
             return
-        dialog = MultiUpDownloadDialog(self.web, up_list, self.db_path, self.download_callback, self)
-        dialog.exec()
+        if self.download_all_callback:
+            self.download_all_callback(up_list)
+
+    def _on_download_subscription(self, season_id, title: str):
+        logger.info(f"[UserCenter] 下载订阅: {title} (season_id={season_id})")
+        asyncio.create_task(self._download_subscription_async(season_id, title))
+
+    async def _download_subscription_async(self, season_id, title: str):
+        try:
+            videos = await asyncio.to_thread(fetch_season_videos, self.web, season_id, wbi=self.wbi)
+            if not videos:
+                QMessageBox.information(self, "提示", f"《{title}》暂无可用分集")
+                return
+            for v in videos:
+                v["uname"] = title
+            self._safe_download_callback(videos)
+            QMessageBox.information(self, "提示", f"已将《{title}》的 {len(videos)} 个分集加入下载队列")
+        except Exception as e:
+            logger.exception(f"[UserCenter] 获取订阅剧集失败 {season_id}")
+            QMessageBox.critical(self, "下载失败", f"获取《{title}》剧集失败: {e}")
+
+    def _on_download_selected_subscriptions(self):
+        rows = self._get_table_selected_rows(self.sub_table)
+        if not rows:
+            QMessageBox.information(self, "提示", "请先勾选订阅")
+            return
+        selected = []
+        for row in rows:
+            sid = self.sub_table.item(row, 1).text() or ""
+            title = self.sub_table.item(row, 2).text() or ""
+            if sid:
+                selected.append((sid, title))
+        if not selected:
+            return
+        logger.info(f"[UserCenter] 批量下载选中订阅: {len(selected)} 个")
+        asyncio.create_task(self._download_selected_subscriptions_async(selected))
+
+    async def _download_selected_subscriptions_async(self, selected: list):
+        all_videos = []
+        failed = []
+        for sid, title in selected:
+            try:
+                videos = await asyncio.to_thread(fetch_season_videos, self.web, sid, wbi=self.wbi)
+                for v in videos:
+                    v["uname"] = title
+                all_videos.extend(videos)
+            except Exception as e:
+                logger.warning(f"[UserCenter] 获取订阅 {title} 剧集失败: {e}")
+                failed.append(title)
+        if failed:
+            QMessageBox.warning(self, "部分失败", "以下订阅获取失败:\n" + "\n".join(failed))
+        if all_videos:
+            self._safe_download_callback(all_videos)
+            QMessageBox.information(self, "提示", f"已将 {len(all_videos)} 个分集加入下载队列")
+        elif not failed:
+            QMessageBox.information(self, "提示", "选中的订阅暂无可用分集")
 
     def _on_download_selected_fav_videos(self):
         logger.info("[UserCenter] 点击批量下载收藏视频")
@@ -633,10 +873,11 @@ class UserCenterDialog(QWidget):
 class UpVideoDialog(QDialog):
     """UP 主视频列表弹窗"""
 
-    def __init__(self, web_client, mid: int, uname: str, db_path: str, download_callback: Callable, parent=None):
+    def __init__(self, web_client, mid: int, uname: str, db_path: str, download_callback: Callable, parent=None, wbi: Optional[WBI] = None):
         super().__init__(parent)
         self.setWindowTitle(f"{uname} 的视频列表")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(1100, 700)
+        self.resize(1200, 750)
         self.web = web_client
         self.mid = mid
         self.uname = uname
@@ -644,7 +885,7 @@ class UpVideoDialog(QDialog):
         self.db = DownloadDB(db_path)
         self.download_callback = download_callback
         self.videos: List[Dict] = []
-        self.wbi = WBI(web_client.sessdata)
+        self.wbi = wbi or WBI(web_client.sessdata)
 
         self._build_ui()
         self._load_videos()
@@ -664,17 +905,23 @@ class UpVideoDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "发布时间", "时长", "状态", "操作"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        up_header = self.table.horizontalHeader()
+        up_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        up_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        up_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        up_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        up_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        up_header.setSectionResizeMode(5, QHeaderView.Interactive)
+        up_header.setSectionResizeMode(6, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 320)
         self.table.setColumnWidth(3, 150)
         self.table.setColumnWidth(4, 80)
         self.table.setColumnWidth(5, 100)
         self.table.setColumnWidth(6, 80)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
@@ -743,10 +990,14 @@ class UpVideoDialog(QDialog):
         for row in sorted(selected_rows):
             bvid = self.table.item(row, 1).text() or ""
             title = self.table.item(row, 2).text() or ""
-            if bvid:
-                videos.append({"bvid": bvid, "title": title, "uname": self.uname})
+            if not bvid:
+                continue
+            # 跳过已有状态的视频（已存档、充电专属、付费、不支持 DASH 等）
+            if _get_video_status(self.db, bvid):
+                continue
+            videos.append({"bvid": bvid, "title": title, "uname": self.uname})
         if not videos:
-            QMessageBox.information(self, "提示", "请先勾选视频")
+            QMessageBox.information(self, "提示", "所选视频均已有状态或无需下载")
             return
         self.download_callback(videos)
 
@@ -757,7 +1008,8 @@ class FavVideoDialog(QDialog):
     def __init__(self, web_client, media_id: int, title: str, db_path: str, download_callback: Callable, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"收藏夹: {title}")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(1100, 700)
+        self.resize(1200, 750)
         self.web = web_client
         self.media_id = media_id
         self.db_path = db_path
@@ -783,17 +1035,23 @@ class FavVideoDialog(QDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        favd_header = self.table.horizontalHeader()
+        favd_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        favd_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        favd_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        favd_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        favd_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        favd_header.setSectionResizeMode(5, QHeaderView.Interactive)
+        favd_header.setSectionResizeMode(6, QHeaderView.Fixed)
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 280)
         self.table.setColumnWidth(3, 120)
         self.table.setColumnWidth(4, 150)
         self.table.setColumnWidth(5, 100)
         self.table.setColumnWidth(6, 80)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
@@ -859,133 +1117,6 @@ class FavVideoDialog(QDialog):
             QMessageBox.information(self, "提示", "请先勾选视频")
             return
         self.download_callback(videos)
-
-
-class MultiUpDownloadDialog(QDialog):
-    """批量下载多个 UP 主全部视频的确认/进度弹窗"""
-
-    def __init__(self, web_client, up_list: List[Dict], db_path: str, download_callback: Callable, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("批量下载UP主视频")
-        self.setMinimumSize(600, 400)
-        self.web = web_client
-        self.up_list = up_list
-        self.db_path = db_path
-        self.db = DownloadDB(db_path)
-        self.download_callback = download_callback
-        self.videos: List[Dict] = []
-        self.wbi = WBI(web_client.sessdata)
-
-        self._build_ui()
-        self._load_all_videos()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        layout.addWidget(QLabel(f"共选中 {len(self.up_list)} 个UP主，正在加载视频列表..."))
-        self.info_label = QLabel("")
-        layout.addWidget(self.info_label)
-
-        self.progress = QProgressDialog("加载中...", "取消", 0, len(self.up_list), self)
-        self.progress.setWindowModality(Qt.WindowModal)
-        self.progress.canceled.connect(self.reject)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "发布时间", "状态"])
-        self.table.setColumnWidth(0, 30)
-        self.table.setColumnWidth(1, 100)
-        self.table.setColumnWidth(2, 320)
-        self.table.setColumnWidth(3, 120)
-        self.table.setColumnWidth(4, 150)
-        self.table.setColumnWidth(5, 100)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
-
-        btn_layout = QHBoxLayout()
-        self.select_all = QCheckBox("全选")
-        self.select_all.clicked.connect(lambda checked: self._on_select_all(checked))
-        btn_layout.addWidget(self.select_all)
-        btn_layout.addStretch()
-        download_btn = QPushButton("批量下载选中视频")
-        download_btn.clicked.connect(self._on_download_selected)
-        btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
-
-    def _on_select_all(self, checked: bool):
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item:
-                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-
-    def _load_all_videos(self):
-        self.videos = []
-        for i, up in enumerate(self.up_list):
-            if self.progress.wasCanceled():
-                return
-            self.progress.setValue(i)
-            self.info_label.setText(f"正在加载: {up.get('uname', '')}")
-            try:
-                vs = fetch_up_videos(self.web, up.get("mid", 0), wbi=self.wbi)
-                for v in vs:
-                    v["uname"] = up.get("uname", "")
-                self.videos.extend(vs)
-            except Exception as e:
-                logger.warning(f"[UserCenter] 加载 {up.get('uname', '')} 视频失败: {e}")
-            # 避免请求过快
-            import time
-            time.sleep(0.3)
-        self.progress.setValue(len(self.up_list))
-        self.info_label.setText(f"共加载 {len(self.videos)} 个视频")
-        self._render_videos()
-
-    def _render_videos(self):
-        self.table.setRowCount(len(self.videos))
-        for i, v in enumerate(self.videos):
-            item = QTableWidgetItem()
-            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            item.setCheckState(Qt.Unchecked)
-            self.table.setItem(i, 0, item)
-            bvid = v.get("bvid", "")
-            self.table.setItem(i, 1, QTableWidgetItem(bvid))
-            self.table.setItem(i, 2, QTableWidgetItem(v.get("title", "")))
-            self.table.setItem(i, 3, QTableWidgetItem(v.get("uname", "")))
-            self.table.setItem(i, 4, QTableWidgetItem(_ts_to_str(v.get("created", 0))))
-            self.table.setItem(i, 5, QTableWidgetItem(_get_video_status(self.db, bvid)))
-
-    def _on_download_selected(self):
-        logger.info("[MultiUpDownload] 点击批量下载选中视频")
-        selected_rows = set()
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item and item.checkState() == Qt.Checked:
-                selected_rows.add(row)
-        for item in self.table.selectedItems():
-            selected_rows.add(item.row())
-
-        videos = []
-        for row in sorted(selected_rows):
-            bvid = self.table.item(row, 1).text() or ""
-            title = self.table.item(row, 2).text() or ""
-            uname = self.table.item(row, 3).text() or ""
-            if bvid:
-                videos.append({"bvid": bvid, "title": title, "uname": uname})
-        logger.info(f"[MultiUpDownload] 选中视频数量: {len(videos)}")
-        if not videos:
-            QMessageBox.information(self, "提示", "请先勾选视频")
-            return
-        try:
-            self.download_callback(videos)
-            logger.info("[MultiUpDownload] 回调执行成功")
-        except Exception:
-            logger.exception("[MultiUpDownload] 回调执行失败")
-            QMessageBox.critical(self, "错误", "启动下载失败，请查看日志")
-            return
-        QMessageBox.information(self, "提示", f"已将 {len(videos)} 个视频加入下载队列")
 
 
 # ---------- B站 API 封装 ----------
@@ -1206,6 +1337,33 @@ def fetch_subscriptions(web) -> List[Dict]:
         if len(items) < ps:
             break
         pn += 1
+    return result
+
+
+def fetch_season_videos(web, season_id: int, wbi: Optional[WBI] = None) -> List[Dict]:
+    """获取番剧/订阅剧集的分集视频列表（带 WBI 签名）。"""
+    if wbi is None:
+        wbi = WBI(web.sessdata)
+    params = {"season_id": season_id}
+    signed = wbi.sign(params)
+    data = web.request(
+        "https://api.bilibili.com/pgc/view/web/season",
+        referer=f"https://www.bilibili.com/bangumi/play/ss{season_id}",
+        params=signed,
+    )
+    if data.get("code") != 0:
+        raise RuntimeError(data.get("message", "获取剧集信息失败"))
+    episodes = data.get("data", {}).get("episodes", [])
+    result = []
+    for ep in episodes:
+        bvid = ep.get("bvid", "")
+        if not bvid:
+            continue
+        result.append({
+            "bvid": bvid,
+            "title": ep.get("long_title") or ep.get("title", ""),
+            "uname": "",
+        })
     return result
 
 

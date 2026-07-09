@@ -1,4 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import shiboken6
+
+
+SHIBOKEN6_DIR = os.path.dirname(shiboken6.__file__)
 
 
 a = Analysis(
@@ -10,6 +15,7 @@ a = Analysis(
         ('tools/aria2', 'tools/aria2'),
         ('config.yaml', '.'),
         ('src', 'src'),
+        (SHIBOKEN6_DIR, 'shiboken6'),
     ],
     hiddenimports=[
         'src',
@@ -34,6 +40,8 @@ a = Analysis(
         'qrcode.image.pil',
         'PIL',
         'PIL.ImageQt',
+        'shiboken6',
+        'shiboken6.Shiboken',
     ],
     hookspath=[],
     hooksconfig={},

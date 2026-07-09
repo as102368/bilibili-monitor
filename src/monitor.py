@@ -1,4 +1,5 @@
 import asyncio
+import os
 import random
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -18,7 +19,7 @@ logger = get_logger(__name__)
 
 
 class BilibiliMonitor:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, start_workers: bool = True):
         self.config = config
         self.sessdata = config["cookie"]["sessdata"]
         self.db = DownloadDB(config["database"]["path"])
@@ -57,8 +58,10 @@ class BilibiliMonitor:
         )
 
         # 上传管理器：与下载解耦，扫描下载目录满 10 个一批上传
-        download_dir = config["download"].get("output_dir", "./downloads")
-        self.upload_manager = UploadManager(download_dir, config["database"]["path"], ctfile_uploader)
+        self.upload_manager = None
+        if start_workers:
+            download_dir = config["download"].get("output_dir", "./downloads")
+            self.upload_manager = UploadManager(download_dir, config["database"]["path"], ctfile_uploader)
 
         self.scheduler = AsyncIOScheduler(
             job_defaults={
@@ -70,6 +73,8 @@ class BilibiliMonitor:
         concurrent = max(1, min(5, config["download"].get("concurrent_downloads", 2)))
         self._download_sem = asyncio.Semaphore(concurrent)
         self.my_mid: int = 0
+        # 当前监控会话中正在下载或已尝试下载的 BV 集合，避免同一周期内重复调度
+        self._active_bvids: set = set()
 
     def _sync_auth_check(self):
         data = self.web.request(
@@ -85,7 +90,8 @@ class BilibiliMonitor:
 
     async def init(self):
         await asyncio.to_thread(self._sync_auth_check)
-        await self.upload_manager.start_worker()
+        if self.upload_manager:
+            await self.upload_manager.start_worker()
         logger.info("[Monitor] 初始化完成，准备通过动态流监控视频投稿")
 
     async def _fetch_dynamic_videos(self) -> List[Dict]:
@@ -139,21 +145,55 @@ class BilibiliMonitor:
             result = await self._throttled_download(bvid, title, uname, stagger_delay)
         except Exception as e:
             logger.error(f"[Monitor] 下载异常 {bvid}: {e}")
+            try:
+                self.db.add_failure(bvid, title, uname, f"下载异常: {e}")
+            except Exception:
+                logger.exception(f"[Monitor] {bvid} 记录失败状态异常")
             return
+        finally:
+            self._active_bvids.discard(bvid)
 
         if not isinstance(result, dict):
             logger.error(f"[Monitor] 下载返回异常 {bvid}: {result}")
+            try:
+                self.db.add_failure(bvid, title, uname, f"返回结果异常: {result}")
+            except Exception:
+                logger.exception(f"[Monitor] {bvid} 记录失败状态异常")
             return
 
         if result.get("success"):
-            self.db.mark_downloaded(bvid, title, uname, mid, result.get("quality", ""))
-            logger.info(f"[Done] {bvid} 下载完成，上传由 UploadManager 扫描目录自动处理")
+            try:
+                self.db.mark_downloaded(
+                    bvid, title, uname, mid,
+                    result.get("quality", ""),
+                    is_preview=result.get("is_preview", False),
+                )
+                output_path = result.get("output_path", "")
+                if output_path and os.path.isfile(output_path):
+                    self.db.add_pending_upload(
+                        file_path=output_path,
+                        bvid=bvid,
+                        title=title,
+                        uploader=uname,
+                        file_size=os.path.getsize(output_path),
+                    )
+                logger.info(f"[Done] {bvid} 下载完成，已加入上传队列")
+            except Exception as e:
+                logger.exception(f"[Monitor] {bvid} 标记已下载失败，下次可能重复下载: {e}")
         else:
             reason = result.get("reason", "")
             if "充电专属" in reason:
                 logger.info(f"[Monitor] {bvid} 为充电专属视频，跳过")
+                try:
+                    self.db.add_failure(bvid, title, uname, reason)
+                except Exception:
+                    logger.exception(f"[Monitor] {bvid} 记录充电专属跳过状态异常")
             else:
                 logger.warning(f"[Fail] {bvid} 下载失败，将在下次重试: {reason}")
+                try:
+                    self.db.add_failure(bvid, title, uname, reason)
+                except Exception:
+                    logger.exception(f"[Monitor] {bvid} 记录失败状态异常")
 
     async def check_all(self):
         try:
@@ -161,29 +201,71 @@ class BilibiliMonitor:
         except Exception:
             logger.exception("[Monitor] check_all 发生未捕获异常，调度器将继续运行")
 
+    async def _fetch_dynamic_videos_paged(self, max_pages: int = 5, max_downloaded_gap: int = 5) -> List[Dict]:
+        """分页获取动态视频，直到遇到连续多个已下载视频或达到最大页数。"""
+        result = []
+        offset = ""
+        downloaded_gap = 0
+
+        for page in range(max_pages):
+            def _fetch():
+                params = {"type": "all", "timezone_offset": -480}
+                if offset:
+                    params["offset"] = offset
+                data = self.web.request(
+                    "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all",
+                    referer="https://t.bilibili.com",
+                    params=params,
+                    timeout=15,
+                )
+                return data
+
+            data = await asyncio.to_thread(_fetch)
+            if data.get("code") != 0:
+                raise RuntimeError(f"获取动态失败: {data}")
+
+            items = data["data"].get("items", [])
+            if not items:
+                break
+
+            has_more = data["data"].get("has_more", False)
+            offset = data["data"].get("offset", "")
+
+            for item in items:
+                video = self._extract_video_from_dynamic(item)
+                if not video or not video.get("bvid"):
+                    continue
+                if self.db.is_downloaded(video["bvid"]):
+                    downloaded_gap += 1
+                    # 连续遇到多个已下载视频，说明后面的暂时不需要处理
+                    if downloaded_gap >= max_downloaded_gap:
+                        return result
+                    continue
+                downloaded_gap = 0
+                result.append(video)
+
+            if not has_more or not offset:
+                break
+
+        return result
+
     async def _do_check_all(self):
         try:
-            items = await self._fetch_dynamic_videos()
+            self.db.set_monitor_state("last_check_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            # 分页获取动态，避免只扫描第一页导致历史新动态被遗漏
+            new_videos = await self._fetch_dynamic_videos_paged(
+                max_pages=5, max_downloaded_gap=5
+            )
         except Exception as e:
             logger.error(f"[Monitor] 获取动态失败: {e}")
             return
 
         page_size = self.config["monitor"].get("page_size", 20)
-        new_videos = []
-        for item in items:
-            try:
-                video = self._extract_video_from_dynamic(item)
-                if not video or not video.get("bvid"):
-                    continue
-                if self.db.is_downloaded(video["bvid"]):
-                    continue
-                new_videos.append(video)
-            except Exception as e:
-                logger.error(f"[Monitor] 解析动态时异常: {e}")
-
         if not new_videos:
             logger.info("[Monitor] 暂无新视频")
             return
+
+        logger.info(f"[Monitor] 本次扫描发现 {len(new_videos)} 个新视频，本次处理 {min(len(new_videos), page_size)} 个")
 
         # 限制本次同时下载的数量
         new_videos = new_videos[:page_size]
@@ -195,23 +277,32 @@ class BilibiliMonitor:
             uname = video["uname"]
             mid = video["mid"]
 
+            # 避免同一监控会话中重复调度同一个 BV
+            if bvid in self._active_bvids:
+                logger.debug(f"[Monitor] {bvid} 已在下载队列中，跳过")
+                continue
+            self._active_bvids.add(bvid)
+
             # 检查失败重试次数
             failure_info = self.db.get_pending_failure_info(bvid)
             fail_count = failure_info.get("fail_count", 0)
             if fail_count > 0:
                 reason = failure_info.get("reason", "")
-                if "充电专属" in reason:
-                    logger.debug(f"[Monitor] {bvid} 为充电专属视频，跳过下载")
+                if "充电专属" in reason or "超过1GB" in reason:
+                    logger.debug(f"[Monitor] {bvid} {reason}，跳过下载")
+                    self._active_bvids.discard(bvid)
                     continue
                 if fail_count >= 5:
                     logger.debug(
                         f"[Monitor] {bvid} 已达到最大重试次数 ({fail_count}/5)，跳过: {reason}"
                     )
                     self.db.mark_failure_skipped(bvid)
+                    self._active_bvids.discard(bvid)
                     continue
 
             logger.info(f"[New] {uname} 发布新视频: {title} ({bvid})")
-            delay = idx * random.uniform(4, 6)
+            interval = max(0, self.config.get("download", {}).get("download_interval", 5))
+            delay = idx * interval + random.uniform(0, 1)
             task = asyncio.create_task(self._download_and_track(bvid, title, uname, mid, delay))
             task.add_done_callback(self._on_download_task_done)
 

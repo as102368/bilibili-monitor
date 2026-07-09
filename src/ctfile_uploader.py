@@ -17,6 +17,33 @@ logger = get_logger(__name__)
 API_BASE = "https://rest.ctfile.com/v1"
 
 
+class _ProgressFile:
+    """包装文件对象以报告读取进度（0-100）。"""
+
+    def __init__(self, file_path: str, callback=None):
+        self.f = open(file_path, "rb")
+        self.callback = callback
+        self.total = os.path.getsize(file_path)
+        self.read_bytes = 0
+        self._last_percent = -1
+
+    def read(self, size=-1):
+        data = self.f.read(size)
+        self.read_bytes += len(data)
+        if self.callback and self.total > 0:
+            percent = int(self.read_bytes / self.total * 100)
+            if percent != self._last_percent:
+                self._last_percent = percent
+                self.callback(percent)
+        return data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.f.close()
+
+
 class CtfileUploader:
     """城通网盘文件上传器"""
 
@@ -139,7 +166,7 @@ class CtfileUploader:
         logger.warning(f"[CTFile] 校验失败: 网盘中未找到 {file_name}")
         return False
 
-    def upload_file(self, file_path: str) -> bool:
+    def upload_file(self, file_path: str, progress_callback=None) -> bool:
         """
         上传单个文件到城通网盘。
         流程：
@@ -159,7 +186,7 @@ class CtfileUploader:
             return False
 
         try:
-            with open(file_path, "rb") as f:
+            with _ProgressFile(file_path, progress_callback) as f:
                 files = {"file": (file_name, f)}
                 data_fields = {
                     "filesize": str(file_size),
@@ -379,6 +406,25 @@ class CtfileUploader:
         logger.info(f"[CTFile] 去重完成: 删除了 {deleted_count} 个重复文件")
         return deleted_count
 
+    def _fetch_remote_file_index(self) -> set:
+        """一次性拉取网盘当前文件夹全部文件，建立 (name, size) 索引集合。"""
+        index = set()
+        start = 0
+        limit = 200
+        while True:
+            files = self.list_files(keyword="", start=start, limit=limit)
+            if not files:
+                break
+            for f in files:
+                name = self._get_file_name(f)
+                size = self._get_file_size(f)
+                if name:
+                    index.add((name, size))
+            if len(files) < limit:
+                break
+            start += limit
+        return index
+
     def sync_local_folder(self, local_dir: str) -> dict:
         """
         同步本地文件夹到城通网盘。
@@ -399,13 +445,17 @@ class CtfileUploader:
             logger.info(f"[CTFile] 本地目录为空: {local_dir}")
             return stats
 
-        logger.info(f"[CTFile] 开始同步本地目录: {local_dir}，共 {len(files)} 个文件")
+        # 一次性建立远程索引，避免对每个本地文件都全量翻页拉取列表 (O(n×m))
+        remote_index = self._fetch_remote_file_index()
+        logger.info(
+            f"[CTFile] 开始同步本地目录: {local_dir}，"
+            f"共 {len(files)} 个文件，远程已有 {len(remote_index)} 个文件"
+        )
         for file_name in files:
             file_path = os.path.join(local_dir, file_name)
             file_size = os.path.getsize(file_path)
 
-            exists = self.verify_file_exists(file_name, file_size)
-            if exists:
+            if (file_name, file_size) in remote_index:
                 logger.info(f"[CTFile] 网盘已存在，删除本地文件: {file_name}")
                 try:
                     os.remove(file_path)
@@ -417,6 +467,7 @@ class CtfileUploader:
                 logger.info(f"[CTFile] 网盘不存在，开始上传: {file_name}")
                 if self.upload_and_delete(file_path):
                     stats["uploaded"] += 1
+                    remote_index.add((file_name, file_size))
                 else:
                     stats["failed"] += 1
 

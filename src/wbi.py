@@ -11,6 +11,9 @@ MIXIN_KEY_ENC_TAB = [
     22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ]
 
+# WBI 密钥有效期约为数小时，设置 1 小时自动刷新阈值
+KEY_REFRESH_INTERVAL = 3600
+
 
 def _get_mixin_key(orig: str) -> str:
     return "".join([orig[i] for i in MIXIN_KEY_ENC_TAB])[:32]
@@ -23,8 +26,9 @@ def _md5(s: str) -> str:
 class WBI:
     def __init__(self, sessdata: str):
         self.sessdata = sessdata
-        self._img_key = None
-        self._sub_key = None
+        self._img_key = ""
+        self._sub_key = ""
+        self._last_refresh = 0
         self._refresh_keys()
 
     def _refresh_keys(self):
@@ -36,20 +40,44 @@ class WBI:
             "Referer": "https://www.bilibili.com",
         }
         cookies = {"SESSDATA": urllib.parse.unquote(self.sessdata)} if self.sessdata else {}
-        resp = requests.get(
-            "https://api.bilibili.com/x/web-interface/nav",
-            headers=headers,
-            cookies=cookies,
-            timeout=10,
-        )
-        data = resp.json()
-        if data.get("code") != 0 and data.get("code") != -101:
+        try:
+            resp = requests.get(
+                "https://api.bilibili.com/x/web-interface/nav",
+                headers=headers,
+                cookies=cookies,
+                timeout=10,
+            )
+            data = resp.json()
+        except Exception as e:
+            raise RuntimeError(f"获取WBI密钥网络失败: {e}")
+
+        code = data.get("code")
+        if code not in (0, -101):
             raise RuntimeError(f"获取WBI密钥失败: {data}")
-        wbi_img = data["data"]["wbi_img"]
-        self._img_key = wbi_img["img_url"].rsplit("/", 1)[-1].split(".")[0]
-        self._sub_key = wbi_img["sub_url"].rsplit("/", 1)[-1].split(".")[0]
+
+        wbi_data = data.get("data") or {}
+        wbi_img = wbi_data.get("wbi_img") or {}
+        img_url = wbi_img.get("img_url", "")
+        sub_url = wbi_img.get("sub_url", "")
+        if not img_url or not sub_url:
+            raise RuntimeError(f"WBI 响应缺少密钥字段: {data}")
+
+        self._img_key = img_url.rsplit("/", 1)[-1].split(".")[0]
+        self._sub_key = sub_url.rsplit("/", 1)[-1].split(".")[0]
+        self._last_refresh = time.time()
+
+    def refresh(self):
+        """外部调用：强制刷新 WBI 密钥。"""
+        self._refresh_keys()
 
     def sign(self, params: dict) -> dict:
+        # 密钥超过阈值自动刷新，减少因过期导致的 403
+        if time.time() - self._last_refresh > KEY_REFRESH_INTERVAL:
+            self._refresh_keys()
+
+        if not self._img_key or not self._sub_key:
+            self._refresh_keys()
+
         mixin_key = _get_mixin_key(self._img_key + self._sub_key)
         params["wts"] = int(time.time())
         # 过滤空值

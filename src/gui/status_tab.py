@@ -2,7 +2,7 @@
 运行状态页：展示当前下载/上传任务、进度条与当前文件。
 """
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QPushButton,
 )
@@ -31,10 +31,51 @@ class StatusTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
+        # 后台任务控制面板
+        control_group = QGroupBox("后台任务控制")
+        control_layout = QGridLayout(control_group)
+        control_layout.setSpacing(10)
+
+        # 动态监控
+        control_layout.addWidget(QLabel("动态监控:"), 0, 0)
+        self.monitor_status_label = QLabel("已停止")
+        self.monitor_status_label.setStyleSheet("color: #f44336; font-weight: bold;")
+        control_layout.addWidget(self.monitor_status_label, 0, 1)
+        self.monitor_start_btn = QPushButton("启动监控")
+        self.monitor_start_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 4px 14px;"
+        )
+        control_layout.addWidget(self.monitor_start_btn, 0, 2)
+        self.monitor_stop_btn = QPushButton("停止监控")
+        self.monitor_stop_btn.setEnabled(False)
+        self.monitor_stop_btn.setStyleSheet(
+            "background-color: #f44336; color: white; font-weight: bold; padding: 4px 14px;"
+        )
+        control_layout.addWidget(self.monitor_stop_btn, 0, 3)
+        control_layout.setColumnStretch(4, 1)
+
+        # 下载后自动上传
+        control_layout.addWidget(QLabel("自动上传:"), 1, 0)
+        self.auto_upload_status_label = QLabel("已关闭")
+        self.auto_upload_status_label.setStyleSheet("color: #888888; font-weight: bold;")
+        control_layout.addWidget(self.auto_upload_status_label, 1, 1)
+        self.auto_upload_btn = QPushButton("启用自动上传")
+        self.auto_upload_btn.setStyleSheet(
+            "background-color: #2196F3; color: white; font-weight: bold; padding: 4px 14px;"
+        )
+        control_layout.addWidget(self.auto_upload_btn, 1, 2)
+        control_layout.setColumnStretch(4, 1)
+
+        layout.addWidget(control_group)
+
         # 顶部概览
         self.summary_label = QLabel("下载中: 0 | 上传中: 0")
         self.summary_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         layout.addWidget(self.summary_label)
+
+        self.last_check_label = QLabel("上次扫描: --")
+        self.last_check_label.setStyleSheet("font-size: 12px; color: #888888;")
+        layout.addWidget(self.last_check_label)
 
         # 下载区域
         download_group = QGroupBox("下载队列")
@@ -80,9 +121,14 @@ class StatusTab(QWidget):
         layout.addWidget(upload_group)
 
     def _update_summary(self):
+        pending = getattr(self, "_pending_upload_count", 0)
         self.summary_label.setText(
-            f"下载中: {len(self.download_rows)} | 上传中: {len(self.upload_rows)}"
+            f"下载中: {len(self.download_rows)} | 上传中: {len(self.upload_rows)} | 待上传: {pending}"
         )
+
+    def set_pending_upload_count(self, count: int):
+        self._pending_upload_count = count
+        self._update_summary()
 
     def on_download_started(self, bvid: str, title: str, uploader: str):
         if bvid in self.download_rows:
@@ -144,3 +190,33 @@ class StatusTab(QWidget):
             if r.row_idx > row.row_idx:
                 r.row_idx -= 1
         self._update_summary()
+
+    def set_monitor_status(self, running: bool):
+        """更新动态监控状态显示与按钮可用性。"""
+        if running:
+            self.monitor_status_label.setText("运行中")
+            self.monitor_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            self.monitor_start_btn.setEnabled(False)
+            self.monitor_stop_btn.setEnabled(True)
+        else:
+            self.monitor_status_label.setText("已停止")
+            self.monitor_status_label.setStyleSheet("color: #f44336; font-weight: bold;")
+            self.monitor_start_btn.setEnabled(True)
+            self.monitor_stop_btn.setEnabled(False)
+
+    def set_last_check_time(self, ts: str):
+        """更新上次扫描时间显示。"""
+        self.last_check_label.setText(f"上次扫描: {ts}" if ts else "上次扫描: --")
+
+    def set_auto_upload_enabled(self, enabled: bool, ready: bool = True):
+        """更新自动上传状态显示与按钮文案。"""
+        if enabled:
+            self.auto_upload_status_label.setText("已启用" if ready else "已启用（未配置）")
+            self.auto_upload_status_label.setStyleSheet(
+                "color: #4CAF50; font-weight: bold;" if ready else "color: #ff9800; font-weight: bold;"
+            )
+            self.auto_upload_btn.setText("关闭自动上传")
+        else:
+            self.auto_upload_status_label.setText("已关闭")
+            self.auto_upload_status_label.setStyleSheet("color: #888888; font-weight: bold;")
+            self.auto_upload_btn.setText("启用自动上传")
