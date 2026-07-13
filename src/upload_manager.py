@@ -52,13 +52,26 @@ class UploadManager:
             return
         self._initialized = True
         self.download_dir = download_dir
-        self.db = DownloadDB(db_path)
+        self._db_path = db_path
+        self._db: Optional[DownloadDB] = None
         self.uploader = ctfile_uploader
         self._worker_task: Optional[asyncio.Task] = None
         self._running = False
         self._stop_event = asyncio.Event()
         # 当前正在上传的文件名集合，防止同一 worker 周期内重复入队
         self._processing: set = set()
+        # 未配置上传器时只警告一次，避免控制台刷屏
+        self._uploader_missing_logged = False
+
+    @property
+    def db(self) -> DownloadDB:
+        """延迟初始化数据库连接，避免在 GUI 主线程创建 UploadManager 时阻塞。"""
+        if self._db is None:
+            self._db = DownloadDB(self._db_path)
+        return self._db
+
+    def _get_db(self) -> DownloadDB:
+        return self.db
 
     def set_uploader(self, ctfile_uploader: Optional[CtfileUploader]):
         self.uploader = ctfile_uploader
@@ -66,7 +79,7 @@ class UploadManager:
     def pending_upload_count(self) -> int:
         """返回当前待上传队列长度。"""
         try:
-            return self.db.count_pending_uploads()
+            return self._get_db().count_pending_uploads()
         except Exception as e:
             logger.warning(f"[UploadManager] 查询待上传数量失败: {e}")
             return 0
@@ -110,10 +123,79 @@ class UploadManager:
     def _is_already_uploaded(self, file_name: str) -> bool:
         """检查数据库中是否已有该文件名的成功上传记录。"""
         try:
-            return self.db.is_upload_success(file_name)
+            return self._get_db().is_upload_success(file_name)
         except Exception as e:
             logger.warning(f"[UploadManager] 查询上传记录失败: {e}")
             return False
+
+    def _mark_failed(
+        self,
+        db: DownloadDB,
+        record_id: int,
+        file_name: str,
+        bvid: str,
+        title: str,
+        uploader: str,
+        file_size: int,
+        reason: str,
+        failed_records: Optional[List[Dict[str, Any]]] = None,
+        emit_signal: bool = True,
+    ):
+        """统一标记上传失败，写入失败记录并释放处理锁；内部异常不影响后续流程。"""
+        try:
+            db.update_upload_status(record_id, "failed", reason)
+        except Exception as e:
+            logger.warning(f"[UploadManager] 更新上传状态失败 {file_name}: {e}")
+        try:
+            db.add_failure(
+                bvid=bvid,
+                title=title or file_name,
+                uploader=uploader,
+                reason=reason,
+                file_size=file_size,
+                file_name=file_name,
+            )
+        except Exception as e:
+            logger.warning(f"[UploadManager] 写入失败记录失败 {file_name}: {e}")
+        if emit_signal:
+            try:
+                emit_upload_finished(file_name, False, reason)
+            except Exception:
+                pass
+        self._processing.discard(file_name)
+        if failed_records is not None:
+            failed_records.append({"file_name": file_name, "reason": reason})
+
+    def _cleanup_missing_pending_files(self, db: DownloadDB) -> int:
+        """清理本地文件已不存在的 pending 记录，避免僵尸记录占满队列。"""
+        try:
+            pending = db.get_pending_uploads(limit=100000)
+            missing = [r for r in pending if not os.path.isfile(r.get("file_path", ""))]
+            if not missing:
+                return 0
+            cleaned = 0
+            for record in missing:
+                try:
+                    self._mark_failed(
+                        db=db,
+                        record_id=record["id"],
+                        file_name=record["file_name"],
+                        bvid=record.get("bvid", ""),
+                        title=record.get("title", "") or record["file_name"],
+                        uploader=record.get("uploader", ""),
+                        file_size=record.get("file_size", 0) or 0,
+                        reason="本地文件不存在",
+                        failed_records=None,
+                        emit_signal=False,
+                    )
+                    cleaned += 1
+                except Exception as e:
+                    logger.warning(f"[UploadManager] 清理缺失记录失败 {record.get('file_name')}: {e}")
+            logger.info(f"[UploadManager] 已清理 {cleaned} 个本地文件不存在的待上传记录")
+            return cleaned
+        except Exception as e:
+            logger.warning(f"[UploadManager] 清理缺失文件记录失败: {e}")
+            return 0
 
     def _scan_files(self) -> List[Dict[str, Any]]:
         """扫描下载目录和待上传队列，返回待上传记录列表（按入队时间排序）。"""
@@ -124,9 +206,7 @@ class UploadManager:
         # 先清理合成失败的孤立 m4s
         self._cleanup_failed_m4s(now)
 
-        pending = self.db.get_pending_uploads(limit=1000)
-        pending_paths = {r["file_path"] for r in pending}
-        pending_names = {r["file_name"] for r in pending}
+        db = self._get_db()
 
         for name in os.listdir(self.download_dir):
             file_path = os.path.join(self.download_dir, name)
@@ -134,9 +214,6 @@ class UploadManager:
                 continue
             # 只上传已完成合并的 mp4 文件；过滤临时/部分文件
             if not name.lower().endswith(".mp4"):
-                continue
-            # 已在待上传队列中则跳过
-            if file_path in pending_paths or name in pending_names:
                 continue
             # 跳过仍在写入的文件（最近修改时间太近）
             try:
@@ -147,25 +224,27 @@ class UploadManager:
                 continue
             # 已上传成功的文件跳过（防止程序重启后重复上传）
             if self._is_already_uploaded(name):
-                logger.info(f"[UploadManager] {name} 已上传过，跳过")
                 continue
             try:
                 file_size = os.path.getsize(file_path)
-                meta = self.db.get_file_metadata_by_name(name)
-                self.db.add_pending_upload(
+                meta = db.get_file_metadata_by_name(name)
+                inserted = db.add_pending_upload(
                     file_path=file_path,
                     bvid=meta.get("bvid", ""),
                     title=meta.get("title", ""),
                     uploader=meta.get("uploader", ""),
                     file_size=file_size,
                 )
-                pending_paths.add(file_path)
-                pending_names.add(name)
-                logger.info(f"[UploadManager] {name} 已加入待上传队列")
+                # 只在真正新增时打印日志，避免重复扫描刷屏
+                if inserted is not None:
+                    logger.info(f"[UploadManager] {name} 已加入待上传队列")
             except Exception as e:
                 logger.warning(f"[UploadManager] 加入待上传队列失败 {name}: {e}")
 
-        return self.db.get_pending_uploads(limit=1000)
+        # 清理本地文件已不存在的 pending 记录，避免僵尸记录占满上传队列
+        self._cleanup_missing_pending_files(db)
+
+        return db.get_pending_uploads(limit=1000)
 
     async def start_worker(self):
         """启动后台上传 worker；若 worker 已异常退出则自动重启。"""
@@ -193,14 +272,23 @@ class UploadManager:
 
     async def _upload_worker(self):
         last_heartbeat = time.time()
+        deduplicated = False
         while self._running:
             try:
+                # 首次运行时清理历史重复记录，避免数据无限膨胀
+                if not deduplicated:
+                    removed = await asyncio.to_thread(self.db.deduplicate_uploads)
+                    if removed:
+                        logger.info(f"[UploadManager] 已清理 {removed} 条重复上传记录")
+                    deduplicated = True
+
                 # 心跳：每分钟打一次日志，方便排查 worker 是否活着
                 if time.time() - last_heartbeat >= 60:
                     logger.info("[UploadManager] worker 心跳正常")
                     last_heartbeat = time.time()
 
-                records = self._scan_files()
+                # 扫描目录和数据库是同步 IO，放到独立线程避免阻塞 GUI 事件循环
+                records = await asyncio.to_thread(self._scan_files)
                 # 先把所有候选文件展示到上传队列，让用户能看到排队状态
                 for record in records:
                     emit_upload_started(record["file_name"])
@@ -224,15 +312,24 @@ class UploadManager:
 
     async def _upload_batch(self, records: List[Dict[str, Any]]):
         if not self.uploader:
-            logger.warning("[UploadManager] 未配置城通网盘上传器，跳过本批次")
+            if not self._uploader_missing_logged:
+                logger.warning("[UploadManager] 未配置城通网盘上传器，跳过上传")
+                self._uploader_missing_logged = True
             return
+        self._uploader_missing_logged = False
 
         logger.info(f"[UploadManager] 开始上传批次，共 {len(records)} 个文件")
+        db = self._get_db()
         success_paths: List[str] = []
+        failed_records: List[Dict[str, Any]] = []
         for record in records:
             record_id = record["id"]
             file_path = record["file_path"]
             file_name = record["file_name"]
+            bvid = record.get("bvid", "")
+            title = record.get("title", "")
+            uploader = record.get("uploader", "")
+            file_size = record.get("file_size", 0) or 0
 
             # 防止同一个文件在本次批次或 worker 周期内被重复处理
             if file_name in self._processing:
@@ -241,10 +338,19 @@ class UploadManager:
             self._processing.add(file_name)
 
             if not os.path.isfile(file_path):
-                logger.warning(f"[UploadManager] 本地文件不存在，标记失败: {file_name}")
-                self.db.update_upload_status(record_id, "failed", "本地文件不存在")
-                emit_upload_finished(file_name, False, "本地文件不存在")
-                self._processing.discard(file_name)
+                # 扫描阶段已清理大部分缺失记录；此处静默处理，避免刷屏
+                self._mark_failed(
+                    db=db,
+                    record_id=record_id,
+                    file_name=file_name,
+                    bvid=bvid,
+                    title=title,
+                    uploader=uploader,
+                    file_size=file_size,
+                    reason="本地文件不存在",
+                    failed_records=failed_records,
+                    emit_signal=False,
+                )
                 continue
 
             emit_upload_started(file_name)
@@ -270,32 +376,71 @@ class UploadManager:
 
                     if deleted:
                         success_paths.append(file_path)
-                        self.db.update_upload_status(record_id, "success", "上传成功")
+                        db.update_upload_status(record_id, "success", "上传成功")
                         emit_upload_finished(file_name, True, "上传成功")
                         logger.info(f"[UploadManager] 上传成功: {file_name}")
                     else:
                         # 上传成功但删除失败：记录为失败，下次重试，避免网盘重复
-                        self.db.update_upload_status(
-                            record_id, "failed", "上传成功但删除本地文件失败，下次重试"
+                        self._mark_failed(
+                            db=db,
+                            record_id=record_id,
+                            file_name=file_name,
+                            bvid=bvid,
+                            title=title,
+                            uploader=uploader,
+                            file_size=file_size,
+                            reason="上传成功但删除本地文件失败，下次重试",
+                            failed_records=failed_records,
                         )
-                        emit_upload_finished(file_name, False, "上传成功但删除本地文件失败，下次重试")
                         logger.warning(f"[UploadManager] 上传成功但删除失败，下次重试: {file_name}")
                 else:
-                    self.db.update_upload_status(
-                        record_id, "failed", "上传失败，保留本地文件稍后重试"
+                    self._mark_failed(
+                        db=db,
+                        record_id=record_id,
+                        file_name=file_name,
+                        bvid=bvid,
+                        title=title,
+                        uploader=uploader,
+                        file_size=file_size,
+                        reason="上传失败，保留本地文件稍后重试",
+                        failed_records=failed_records,
                     )
-                    emit_upload_finished(file_name, False, "上传失败，保留本地文件稍后重试")
                     logger.warning(f"[UploadManager] 上传失败，保留本地文件稍后重试: {file_name}")
             except asyncio.TimeoutError:
+                self._mark_failed(
+                    db=db,
+                    record_id=record_id,
+                    file_name=file_name,
+                    bvid=bvid,
+                    title=title,
+                    uploader=uploader,
+                    file_size=file_size,
+                    reason="上传超时（超过 5 分钟）",
+                    failed_records=failed_records,
+                )
                 logger.error(f"[UploadManager] 上传超时: {file_name}")
-                self.db.update_upload_status(record_id, "failed", "上传超时（超过 5 分钟）")
-                emit_upload_finished(file_name, False, "上传超时（超过 5 分钟）")
             except Exception as e:
+                self._mark_failed(
+                    db=db,
+                    record_id=record_id,
+                    file_name=file_name,
+                    bvid=bvid,
+                    title=title,
+                    uploader=uploader,
+                    file_size=file_size,
+                    reason=f"上传异常: {e}",
+                    failed_records=failed_records,
+                )
                 logger.exception(f"[UploadManager] 上传异常: {file_name}")
-                self.db.update_upload_status(record_id, "failed", f"上传异常: {e}")
-                emit_upload_finished(file_name, False, f"上传异常: {e}")
             finally:
                 self._processing.discard(file_name)
+
+        if failed_records:
+            reasons = ", ".join({r["reason"] for r in failed_records})
+            logger.warning(
+                f"[UploadManager] 本批次失败 {len(failed_records)} 个（原因: {reasons}），"
+                f"已加入失败记录并跳过"
+            )
 
         logger.info(
             f"[UploadManager] 批次完成: 成功 {len(success_paths)}/{len(records)}, "

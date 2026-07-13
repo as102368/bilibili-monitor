@@ -19,6 +19,8 @@ class DownloadDB:
         self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # 出现锁时让 SQLite 自动重试，避免 GUI 线程因短暂锁等待而卡顿
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self._lock = threading.RLock()
         self._init_table()
         self._init_uploads_table()
@@ -181,6 +183,10 @@ class DownloadDB:
                 )
                 """
             )
+            # 为 UploadManager 高频查询字段建索引，避免大表全表扫描
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_file_name ON uploads(file_name)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_status_file_name ON uploads(status, file_name)")
             self.conn.commit()
         self._migrate_add_file_path_column()
 
@@ -221,9 +227,16 @@ class DownloadDB:
         title: str,
         uploader: str,
         file_size: int,
-    ) -> int:
+    ) -> int | None:
         file_name = os.path.basename(file_path)
         with self._locked():
+            # 同一文件无论状态如何都只保留一条记录，避免扫描时重复入队
+            cur = self.conn.execute(
+                "SELECT id FROM uploads WHERE file_name = ? LIMIT 1",
+                (file_name,),
+            )
+            if cur.fetchone() is not None:
+                return None
             cur = self.conn.execute(
                 """
                 INSERT INTO uploads
@@ -369,6 +382,35 @@ class DownloadDB:
             )
             return cur.fetchone() is not None
 
+    def deduplicate_uploads(self) -> int:
+        """清理 uploads 表中按 file_name 重复的记录，保留 id 最大的一条。返回删除数量。"""
+        with self._locked():
+            total_before = self.conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0]
+            if total_before == 0:
+                return 0
+
+            # 使用临时表保留最新记录，再清空原表回插，比大批量 DELETE 更快
+            self.conn.execute("""
+                CREATE TEMPORARY TABLE IF NOT EXISTS _uploads_keep AS
+                SELECT * FROM uploads WHERE 0=1
+            """)
+            self.conn.execute("DELETE FROM _uploads_keep")
+            self.conn.execute("""
+                INSERT INTO _uploads_keep
+                SELECT * FROM uploads
+                WHERE id IN (SELECT MAX(id) FROM uploads GROUP BY file_name)
+            """)
+            self.conn.execute("DELETE FROM uploads")
+            self.conn.execute("""
+                INSERT INTO uploads
+                SELECT * FROM _uploads_keep
+            """)
+            self.conn.execute("DROP TABLE _uploads_keep")
+            self.conn.commit()
+
+            total_after = self.conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0]
+            return total_before - total_after
+
     # ---------- failures ----------
 
     def _init_failures_table(self):
@@ -378,6 +420,7 @@ class DownloadDB:
                 CREATE TABLE IF NOT EXISTS failures (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bvid TEXT,
+                    file_name TEXT,
                     title TEXT,
                     uploader TEXT,
                     reason TEXT,
@@ -390,6 +433,7 @@ class DownloadDB:
         self._migrate_add_fail_count_column()
         self._migrate_add_failure_size_column()
         self._migrate_add_failure_fav_column()
+        self._migrate_add_failure_file_name_column()
 
     def _migrate_add_fail_count_column(self):
         with self._locked():
@@ -415,6 +459,14 @@ class DownloadDB:
             except sqlite3.OperationalError:
                 pass
 
+    def _migrate_add_failure_file_name_column(self):
+        with self._locked():
+            try:
+                self.conn.execute("ALTER TABLE failures ADD COLUMN file_name TEXT")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
     def add_failure(
         self,
         bvid: str,
@@ -423,31 +475,51 @@ class DownloadDB:
         reason: str,
         file_size: int = 0,
         fav_added: bool = False,
+        file_name: str = "",
     ):
-        """添加或更新失败记录；若已存在同 BV 的 pending/retried/skipped 记录，仅更新原因和时间"""
+        """添加或更新失败记录；若已存在同 BV 或同文件名的 pending/retried/skipped 记录，仅更新原因和时间"""
         with self._locked():
-            cur = self.conn.execute(
-                """
-                UPDATE failures
-                SET reason = ?,
-                    fail_count = COALESCE(fail_count, 1) + 1,
-                    created_at = ?,
-                    status = 'pending',
-                    file_size = COALESCE(?, file_size),
-                    fav_added = COALESCE(?, fav_added)
-                WHERE bvid = ? AND status IN ('pending', 'retried', 'skipped')
-                """,
-                (reason, _format_ts(), file_size, 1 if fav_added else 0, bvid),
-            )
-            if cur.rowcount == 0:
+            if bvid:
+                cur = self.conn.execute(
+                    """
+                    UPDATE failures
+                    SET reason = ?,
+                        fail_count = COALESCE(fail_count, 1) + 1,
+                        created_at = ?,
+                        status = 'pending',
+                        file_size = COALESCE(?, file_size),
+                        fav_added = COALESCE(?, fav_added)
+                    WHERE bvid = ? AND status IN ('pending', 'retried', 'skipped')
+                    """,
+                    (reason, _format_ts(), file_size, 1 if fav_added else 0, bvid),
+                )
+            elif file_name:
+                cur = self.conn.execute(
+                    """
+                    UPDATE failures
+                    SET reason = ?,
+                        fail_count = COALESCE(fail_count, 1) + 1,
+                        created_at = ?,
+                        status = 'pending',
+                        file_size = COALESCE(?, file_size),
+                        fav_added = COALESCE(?, fav_added)
+                    WHERE file_name = ? AND status IN ('pending', 'retried', 'skipped')
+                    """,
+                    (reason, _format_ts(), file_size, 1 if fav_added else 0, file_name),
+                )
+            else:
+                cur = None
+
+            if cur is None or cur.rowcount == 0:
                 self.conn.execute(
                     """
                     INSERT INTO failures
-                    (bvid, title, uploader, reason, status, fail_count, created_at, file_size, fav_added)
-                    VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?)
+                    (bvid, file_name, title, uploader, reason, status, fail_count, created_at, file_size, fav_added)
+                    VALUES (?, ?, ?, ?, ?, 'pending', 1, ?, ?, ?)
                     """,
                     (
                         bvid,
+                        file_name,
                         title,
                         uploader,
                         reason,
@@ -479,7 +551,7 @@ class DownloadDB:
         with self._locked():
             cur = self.conn.execute(
                 """
-                SELECT id, bvid, title, uploader, reason, status, created_at, file_size, fav_added
+                SELECT id, bvid, file_name, title, uploader, reason, status, created_at, file_size, fav_added
                 FROM failures
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
@@ -492,13 +564,14 @@ class DownloadDB:
             result.append({
                 "id": row[0],
                 "bvid": row[1],
-                "title": row[2],
-                "uploader": row[3],
-                "reason": row[4],
-                "status": row[5],
-                "created_at": row[6],
-                "file_size": row[7] or 0,
-                "fav_added": bool(row[8]),
+                "file_name": row[2],
+                "title": row[3],
+                "uploader": row[4],
+                "reason": row[5],
+                "status": row[6],
+                "created_at": row[7],
+                "file_size": row[8] or 0,
+                "fav_added": bool(row[9]),
             })
         return result
 

@@ -1188,13 +1188,19 @@ class MainWindow(QMainWindow):
             return False
 
     def _refresh_last_check_time(self):
+        asyncio.get_event_loop().create_task(self._async_refresh_last_check_time())
+
+    async def _async_refresh_last_check_time(self):
+        def _get_last_check():
+            return self.upload_manager.db.get_monitor_state("last_check_time", "")
+
         try:
-            ts = self.db.get_monitor_state("last_check_time", "")
+            ts = await asyncio.to_thread(_get_last_check)
             self.status_tab.set_last_check_time(ts)
         except Exception:
             pass
         try:
-            pending = self.upload_manager.pending_upload_count()
+            pending = await asyncio.to_thread(self.upload_manager.pending_upload_count)
             self.status_tab.set_pending_upload_count(pending)
         except Exception:
             pass
