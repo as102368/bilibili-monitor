@@ -6,6 +6,7 @@ https://openapi.ctfile.com/
 import os
 import time
 import requests
+from difflib import SequenceMatcher
 from typing import Optional, List, Dict, Any
 from collections import defaultdict
 
@@ -339,44 +340,91 @@ class CtfileUploader:
                     continue
         return 0
 
+    @staticmethod
+    def _name_similarity(a: str, b: str) -> float:
+        """计算两个文件名的相似度，返回 0.0 ~ 1.0。"""
+        if not a or not b:
+            return 0.0
+        # 快速长度预筛：长度差异超过 5% 时不可能达到 0.95 相似度
+        len_a, len_b = len(a), len(b)
+        max_len = max(len_a, len_b)
+        if max_len > 0 and abs(len_a - len_b) / max_len > 0.05:
+            return 0.0
+        return SequenceMatcher(None, a, b).ratio()
+
     def find_duplicates(self) -> List[List[Dict[str, Any]]]:
         """
         扫描当前文件夹，查找重复文件。
-        由于城通网盘 API 未明确提供 MD5，当前基于 (name, size) 判断重复。
-        如果 API 实际返回了 md5/hash 字段，会优先使用 md5 判断。
+        判断规则：文件大小完全相同，且文件名相似度 ≥ 95%。
         返回: 重复文件组列表，每组包含 2 个及以上文件字典。
         """
         files = self.get_all_files()
         if not files:
             return []
 
-        # 优先使用 md5/hash 字段（如果 API 返回了）
-        groups = defaultdict(list)
-        has_md5 = any(f.get("md5") or f.get("hash") for f in files)
+        SIMILARITY_THRESHOLD = 0.95
 
-        if has_md5:
-            for f in files:
-                md5 = f.get("md5") or f.get("hash") or ""
-                key = (self._get_file_name(f), self._get_file_size(f), md5)
-                groups[key].append(f)
-        else:
-            for f in files:
-                key = (self._get_file_name(f), self._get_file_size(f))
-                groups[key].append(f)
+        # 第一步：按文件大小精确分组
+        size_groups = defaultdict(list)
+        for f in files:
+            size = self._get_file_size(f)
+            size_groups[size].append(f)
 
-        # 安全检查：如果最大组过大，说明字段解析有问题，拒绝执行
-        max_group_size = max((len(g) for g in groups.values()), default=0)
+        duplicates: List[List[Dict[str, Any]]] = []
+
+        # 第二步：在相同大小的文件内，按文件名相似度聚类
+        for size, group in size_groups.items():
+            if len(group) < 2:
+                continue
+
+            n = len(group)
+            names = [self._get_file_name(f) for f in group]
+
+            # 并查集：相似度达标的文件归入同一组
+            parent = list(range(n))
+
+            def find(x: int) -> int:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def union(x: int, y: int):
+                rx, ry = find(x), find(y)
+                if rx != ry:
+                    parent[rx] = ry
+
+            for i in range(n):
+                name_i = names[i]
+                if not name_i:
+                    continue
+                for j in range(i + 1, n):
+                    name_j = names[j]
+                    if not name_j:
+                        continue
+                    if self._name_similarity(name_i, name_j) >= SIMILARITY_THRESHOLD:
+                        union(i, j)
+
+            clusters = defaultdict(list)
+            for idx, f in enumerate(group):
+                clusters[find(idx)].append(f)
+
+            for cluster in clusters.values():
+                if len(cluster) >= 2:
+                    duplicates.append(cluster)
+
+        # 安全检查：最大重复组过大时阻止操作，防止字段解析异常导致误删
+        max_group_size = max((len(g) for g in duplicates), default=0)
         if max_group_size > len(files) * 0.3:
             logger.error(
-                f"[CTFile] 去重安全检查失败: 最大分组包含 {max_group_size}/{len(files)} 个文件，"
+                f"[CTFile] 去重安全检查失败: 最大重复组包含 {max_group_size}/{len(files)} 个文件，"
                 f"可能 name/size 字段解析异常。已阻止删除操作。"
             )
             raise ValueError(
-                f"扫描结果异常: 超过30%的文件被归为同一组({max_group_size}/{len(files)})。"
+                f"扫描结果异常: 超过30%的文件被归为同一重复组({max_group_size}/{len(files)})。"
                 f"可能网盘API返回的字段格式与预期不符，已自动阻止删除。"
             )
 
-        duplicates = [group for group in groups.values() if len(group) >= 2]
         logger.info(f"[CTFile] 扫描完成: {len(files)} 个文件，发现 {len(duplicates)} 组重复")
         return duplicates
 

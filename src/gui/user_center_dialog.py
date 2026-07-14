@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Callable
 import requests
 from PySide6.QtWidgets import (
     QDialog,
+    QBoxLayout,
     QVBoxLayout,
     QHBoxLayout,
     QWidget,
@@ -78,7 +79,7 @@ class UserCenterDialog(QWidget):
         download_all_callback: Optional[Callable[[List[Dict]], None]] = None,
     ):
         super().__init__(parent)
-        self.setMinimumSize(1280, 800)
+        self.setMinimumSize(800, 650)
         self.resize(1400, 850)
         self.web = web_client
         self.wbi = WBI(web_client.sessdata)
@@ -95,26 +96,22 @@ class UserCenterDialog(QWidget):
         QTimer.singleShot(0, self._load_user_info)
 
     def _build_ui(self):
-        main_layout = QHBoxLayout(self)
+        self._left_sidebar = self._build_sidebar()
+        self._right_stack = self._build_stack()
 
-        # 左侧导航
+        self._main_layout = QHBoxLayout(self)
+        self._main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout.setSpacing(0)
+        self._main_layout.addWidget(self._left_sidebar)
+        self._main_layout.addWidget(self._right_stack, 1)
+
+    def _build_sidebar(self) -> QWidget:
+        """左侧导航栏：固定宽度，仅保留功能入口列表。"""
         left_widget = QWidget()
-        left_widget.setMaximumWidth(180)
+        left_widget.setFixedWidth(180)
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-
-        self.avatar_label = QLabel()
-        self.avatar_label.setFixedSize(72, 72)
-        self.avatar_label.setAlignment(Qt.AlignCenter)
-        self.avatar_label.setStyleSheet(
-            "QLabel { border: 2px solid #4a4a4a; border-radius: 36px; background-color: #2a2a2a; }"
-        )
-        left_layout.addWidget(self.avatar_label, alignment=Qt.AlignCenter)
-
-        self.uname_label = QLabel("未登录")
-        self.uname_label.setAlignment(Qt.AlignCenter)
-        self.uname_label.setStyleSheet("font-weight: bold; margin: 8px 0;")
-        left_layout.addWidget(self.uname_label)
+        left_layout.setContentsMargins(12, 16, 12, 16)
+        left_layout.setSpacing(12)
 
         self.nav_list = QListWidget()
         self.nav_list.addItem("我的关注")
@@ -125,38 +122,52 @@ class UserCenterDialog(QWidget):
         self.nav_list.addItem("我的订阅")
         self.nav_list.setCurrentRow(0)
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
+        self.nav_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.nav_list.setStyleSheet(
+            "QListWidget { border: none; border-radius: 6px; background-color: #2a2a2a; color: #eeeeee; outline: none; }"
+            "QListWidget::item { padding: 12px 14px; border-radius: 6px; }"
+            "QListWidget::item:hover { background-color: #3a3a3a; }"
+            "QListWidget::item:selected { background-color: #1E88E5; }"
+        )
         left_layout.addWidget(self.nav_list)
+        left_layout.addStretch()
 
-        main_layout.addWidget(left_widget)
+        return left_widget
 
-        # 右侧内容
+    def _build_stack(self) -> QStackedWidget:
+        """右侧主内容区：堆叠多个二级页面。"""
         self.stack = QStackedWidget()
 
-        # 1. 我的关注
         self.follow_page = self._build_follow_page()
         self.stack.addWidget(self.follow_page)
 
-        # 2. 关注分组
         self.group_page = self._build_group_page()
         self.stack.addWidget(self.group_page)
 
-        # 3. 收藏列表
         self.fav_page = self._build_fav_page()
         self.stack.addWidget(self.fav_page)
 
-        # 4. 稍后再看
         self.watchlater_page = self._build_video_list_page("稍后再看")
         self.stack.addWidget(self.watchlater_page)
 
-        # 5. 历史记录
         self.history_page = self._build_video_list_page("历史记录")
         self.stack.addWidget(self.history_page)
 
-        # 6. 我的订阅
         self.subscription_page = self._build_subscription_page()
         self.stack.addWidget(self.subscription_page)
 
-        main_layout.addWidget(self.stack, 1)
+        return self.stack
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_group_area_height()
+
+    def _update_group_area_height(self):
+        """分组列表区域最大高度随窗口高度动态调整（约占右侧区域的 40%）。"""
+        if not hasattr(self, "_group_area"):
+            return
+        available = max(self._right_stack.height() - 120, 200)
+        self._group_area.setMaximumHeight(int(available * 0.45))
 
     def _build_follow_page(self) -> QWidget:
         page = QWidget()
@@ -183,13 +194,15 @@ class UserCenterDialog(QWidget):
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
-        # 关注表格：仅保留 复选框 / 昵称 / 操作
+        # 关注表格：占满剩余高度，内容超出时滚动
         self.follow_table = QTableWidget()
         self.follow_table.setColumnCount(3)
         self.follow_table.setHorizontalHeaderLabels(["", "昵称", "操作"])
         self.follow_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.follow_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.follow_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.follow_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.follow_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.follow_table.setStyleSheet(
             "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
             "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
@@ -206,10 +219,10 @@ class UserCenterDialog(QWidget):
         self.follow_table.verticalHeader().setVisible(False)
         layout.addWidget(self.follow_table, 1)
 
-        # 底部操作栏：固定高度，防止被压缩
+        # 底部操作栏
         bottom = QWidget()
-        bottom.setMinimumHeight(60)
-        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bottom.setMinimumHeight(52)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
             "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
             "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
@@ -251,6 +264,7 @@ class UserCenterDialog(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # 顶部标题栏
         top = QHBoxLayout()
         title = QLabel("关注分组")
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
@@ -266,15 +280,32 @@ class UserCenterDialog(QWidget):
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
+        # 上方分组列表区域：高度自适应并自带滚动条，防止挤压下方表格
+        self._group_area = QWidget()
+        self._group_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        group_area_layout = QVBoxLayout(self._group_area)
+        group_area_layout.setContentsMargins(0, 0, 0, 0)
+        group_area_layout.setSpacing(8)
+
         self.group_list = QListWidget()
-        self.group_list.setMaximumHeight(160)
+        self.group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.group_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.group_list.setStyleSheet(
-            "QListWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; color: #eeeeee; }"
+            "QListWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; color: #eeeeee; outline: none; }"
             "QListWidget::item { padding: 8px; border-bottom: 1px solid #333; }"
+            "QListWidget::item:hover { background-color: #333333; }"
             "QListWidget::item:selected { background-color: #1E88E5; }"
         )
         self.group_list.itemClicked.connect(self._on_group_selected)
-        layout.addWidget(self.group_list)
+        group_area_layout.addWidget(self.group_list, 1)
+        layout.addWidget(self._group_area)
+
+        # 下方分组成员区域：占满剩余高度，列表超出时滚动
+        member_area = QWidget()
+        member_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        member_area_layout = QVBoxLayout(member_area)
+        member_area_layout.setContentsMargins(0, 0, 0, 0)
+        member_area_layout.setSpacing(8)
 
         self.group_member_table = QTableWidget()
         self.group_member_table.setColumnCount(3)
@@ -282,6 +313,8 @@ class UserCenterDialog(QWidget):
         self.group_member_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.group_member_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.group_member_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.group_member_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.group_member_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.group_member_table.setStyleSheet(
             "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
             "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
@@ -295,11 +328,11 @@ class UserCenterDialog(QWidget):
         self.group_member_table.setColumnWidth(0, 50)
         self.group_member_table.setColumnWidth(2, 90)
         self.group_member_table.verticalHeader().setVisible(False)
-        layout.addWidget(self.group_member_table, 1)
+        member_area_layout.addWidget(self.group_member_table, 1)
 
         bottom = QWidget()
-        bottom.setMinimumHeight(60)
-        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bottom.setMinimumHeight(52)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
             "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
             "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
@@ -322,26 +355,60 @@ class UserCenterDialog(QWidget):
         )
         download_btn.clicked.connect(self._on_download_selected_group_members)
         btn_layout.addWidget(download_btn)
-        layout.addWidget(bottom)
+        member_area_layout.addWidget(bottom)
+
+        layout.addWidget(member_area, 1)
 
         return page
 
     def _build_fav_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
+        # 顶部标题栏
         top = QHBoxLayout()
-        top.addWidget(QLabel("收藏列表"))
+        title = QLabel("收藏列表")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        top.addWidget(title)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setMinimumHeight(32)
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #4a4a4a; }"
+        )
         refresh_btn.clicked.connect(self._load_fav_folders)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
+        # 上方收藏夹列表：高度自适应并滚动
+        fav_area = QWidget()
+        fav_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        fav_area_layout = QVBoxLayout(fav_area)
+        fav_area_layout.setContentsMargins(0, 0, 0, 0)
+        fav_area_layout.setSpacing(8)
+
         self.fav_list = QListWidget()
+        self.fav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.fav_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.fav_list.setStyleSheet(
+            "QListWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; color: #eeeeee; outline: none; }"
+            "QListWidget::item { padding: 8px; border-bottom: 1px solid #333; }"
+            "QListWidget::item:hover { background-color: #333333; }"
+            "QListWidget::item:selected { background-color: #1E88E5; }"
+        )
         self.fav_list.itemClicked.connect(self._on_fav_folder_selected)
-        layout.addWidget(self.fav_list, 1)
+        fav_area_layout.addWidget(self.fav_list, 1)
+        layout.addWidget(fav_area)
+
+        # 下方收藏视频区域：占满剩余高度
+        video_area = QWidget()
+        video_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        video_area_layout = QVBoxLayout(video_area)
+        video_area_layout.setContentsMargins(0, 0, 0, 0)
+        video_area_layout.setSpacing(8)
 
         self.fav_video_table = QTableWidget()
         self.fav_video_table.setColumnCount(7)
@@ -349,6 +416,14 @@ class UserCenterDialog(QWidget):
         self.fav_video_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.fav_video_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.fav_video_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.fav_video_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.fav_video_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.fav_video_table.setStyleSheet(
+            "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
+            "QTableWidget::item { padding: 6px; color: #eeeeee; }"
+            "QTableWidget::item:selected { background-color: #1E88E5; }"
+        )
         fav_header = self.fav_video_table.horizontalHeader()
         fav_header.setSectionResizeMode(0, QHeaderView.Fixed)
         fav_header.setSectionResizeMode(1, QHeaderView.Interactive)
@@ -363,33 +438,68 @@ class UserCenterDialog(QWidget):
         self.fav_video_table.setColumnWidth(4, 150)
         self.fav_video_table.setColumnWidth(5, 100)
         self.fav_video_table.setColumnWidth(6, 80)
-        layout.addWidget(self.fav_video_table, 2)
+        video_area_layout.addWidget(self.fav_video_table, 1)
 
-        btn_layout = QHBoxLayout()
+        bottom = QWidget()
+        bottom.setMinimumHeight(52)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        bottom.setStyleSheet(
+            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
+            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        btn_layout = QHBoxLayout(bottom)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
         self.fav_select_all = QCheckBox("全选")
         self.fav_select_all.clicked.connect(self._on_fav_select_all)
         btn_layout.addWidget(self.fav_select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中视频")
+        download_btn.setMinimumHeight(38)
+        download_btn.setMinimumWidth(180)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:pressed { background-color: #1565C0; }"
+        )
         download_btn.clicked.connect(self._on_download_selected_fav_videos)
         btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
+        video_area_layout.addWidget(bottom)
+
+        layout.addWidget(video_area, 1)
 
         return page
 
     def _build_video_list_page(self, title: str) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
+        # 顶部标题栏
         top = QHBoxLayout()
-        top.addWidget(QLabel(title))
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        top.addWidget(title_label)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setMinimumHeight(32)
         refresh_btn.setProperty("page_type", title)
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #4a4a4a; }"
+        )
         refresh_btn.clicked.connect(self._on_video_page_refresh)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
+
+        # 视频列表区域：占满剩余高度，超出滚动
+        table_area = QWidget()
+        table_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        table_area_layout = QVBoxLayout(table_area)
+        table_area_layout.setContentsMargins(0, 0, 0, 0)
+        table_area_layout.setSpacing(8)
 
         table = QTableWidget()
         table.setColumnCount(7)
@@ -397,6 +507,14 @@ class UserCenterDialog(QWidget):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.ExtendedSelection)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setStyleSheet(
+            "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
+            "QTableWidget::item { padding: 6px; color: #eeeeee; }"
+            "QTableWidget::item:selected { background-color: #1E88E5; }"
+        )
         v_header = table.horizontalHeader()
         v_header.setSectionResizeMode(0, QHeaderView.Fixed)
         v_header.setSectionResizeMode(1, QHeaderView.Interactive)
@@ -411,32 +529,67 @@ class UserCenterDialog(QWidget):
         table.setColumnWidth(4, 150)
         table.setColumnWidth(5, 100)
         table.setColumnWidth(6, 80)
-        layout.addWidget(table, 2)
+        table_area_layout.addWidget(table, 1)
 
-        btn_layout = QHBoxLayout()
+        bottom = QWidget()
+        bottom.setMinimumHeight(52)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        bottom.setStyleSheet(
+            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
+            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        btn_layout = QHBoxLayout(bottom)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
         select_all = QCheckBox("全选")
         select_all.clicked.connect(lambda checked, t=table: self._on_table_select_all(t, checked))
         btn_layout.addWidget(select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中视频")
+        download_btn.setMinimumHeight(38)
+        download_btn.setMinimumWidth(180)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:pressed { background-color: #1565C0; }"
+        )
         download_btn.clicked.connect(lambda: self._on_download_table_videos(table))
         btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
+        table_area_layout.addWidget(bottom)
+
+        layout.addWidget(table_area, 1)
 
         return page
 
     def _build_subscription_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
+        # 顶部标题栏
         top = QHBoxLayout()
-        top.addWidget(QLabel("我的订阅"))
+        title = QLabel("我的订阅")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        top.addWidget(title)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setMinimumHeight(32)
+        refresh_btn.setStyleSheet(
+            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #4a4a4a; }"
+        )
         refresh_btn.clicked.connect(self._load_subscriptions)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
+
+        # 订阅列表区域：占满剩余高度，超出滚动
+        table_area = QWidget()
+        table_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        table_area_layout = QVBoxLayout(table_area)
+        table_area_layout.setContentsMargins(0, 0, 0, 0)
+        table_area_layout.setSpacing(8)
 
         self.sub_table = QTableWidget()
         self.sub_table.setColumnCount(5)
@@ -449,18 +602,45 @@ class UserCenterDialog(QWidget):
         self.sub_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.sub_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.sub_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sub_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sub_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sub_table.setStyleSheet(
+            "QTableWidget { border: 1px solid #3a3a3a; border-radius: 6px; background-color: #252525; gridline-color: #333; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ffffff; padding: 6px; border: none; border-bottom: 1px solid #3a3a3a; }"
+            "QTableWidget::item { padding: 6px; color: #eeeeee; }"
+            "QTableWidget::item:selected { background-color: #1E88E5; }"
+        )
         self.sub_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.sub_table)
+        table_area_layout.addWidget(self.sub_table, 1)
 
-        btn_layout = QHBoxLayout()
+        bottom = QWidget()
+        bottom.setMinimumHeight(52)
+        bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        bottom.setStyleSheet(
+            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
+            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; }"
+        )
+        btn_layout = QHBoxLayout(bottom)
+        btn_layout.setContentsMargins(14, 10, 14, 10)
         self.sub_select_all = QCheckBox("全选")
         self.sub_select_all.clicked.connect(self._on_sub_select_all)
         btn_layout.addWidget(self.sub_select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中订阅")
+        download_btn.setMinimumHeight(38)
+        download_btn.setMinimumWidth(180)
+        download_btn.setCursor(Qt.PointingHandCursor)
+        download_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:pressed { background-color: #1565C0; }"
+        )
         download_btn.clicked.connect(self._on_download_selected_subscriptions)
         btn_layout.addWidget(download_btn)
-        layout.addLayout(btn_layout)
+        table_area_layout.addWidget(bottom)
+
+        layout.addWidget(table_area, 1)
 
         return page
 
@@ -542,16 +722,6 @@ class UserCenterDialog(QWidget):
                 info = data["data"]
                 self.user_info = info
                 self.user_mid = info.get("mid", 0)
-                self.uname_label.setText(info.get("uname", "未登录"))
-                face_url = info.get("face", "")
-                if face_url:
-                    resp = await asyncio.to_thread(self.web.session.get, face_url, timeout=15)
-                    resp.raise_for_status()
-                    pixmap = QPixmap()
-                    pixmap.loadFromData(resp.content)
-                    if not pixmap.isNull():
-                        rounded = self._make_round_avatar(pixmap, 72)
-                        self.avatar_label.setPixmap(rounded)
                 # 获取到用户信息后再加载关注列表，确保 mid 已就绪
                 self._load_followings()
         except Exception as e:

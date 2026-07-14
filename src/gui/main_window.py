@@ -564,7 +564,7 @@ class CtfileDeduplicateTab(QWidget):
         layout.setSpacing(10)
 
         info = QLabel(
-            "说明: 城通网盘 API 未提供 MD5，当前按「文件名 + 大小」判断重复，"
+            "说明: 城通网盘 API 未提供 MD5，当前按「文件名相似度 ≥ 95% 且大小相同」判断重复，"
             "每组保留第一个文件，其余将被移至回收站。"
         )
         info.setWordWrap(True)
