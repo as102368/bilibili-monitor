@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import load_app_icon
+
 
 class QrLoginDialog(QDialog):
     """哔哩哔哩扫码登录对话框"""
@@ -19,7 +21,8 @@ class QrLoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("哔哩哔哩扫码登录")
-        self.setFixedSize(340, 440)
+        self.setWindowIcon(load_app_icon())
+        self.setFixedSize(360, 480)
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -46,26 +49,30 @@ class QrLoginDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(20, 24, 20, 20)
         layout.setAlignment(Qt.AlignCenter)
 
         tip = QLabel("请使用 哔哩哔哩 App 扫描下方二维码")
         tip.setAlignment(Qt.AlignCenter)
-        tip.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 8px;")
+        tip.setStyleSheet("font-size: 15px; font-weight: bold; background: transparent;")
         layout.addWidget(tip)
 
         self.qr_label = QLabel()
-        self.qr_label.setFixedSize(220, 220)
+        self.qr_label.setFixedSize(240, 240)
         self.qr_label.setAlignment(Qt.AlignCenter)
-        self.qr_label.setStyleSheet("border: 1px solid #ddd; background: #fff;")
+        self.qr_label.setStyleSheet("border: 1px solid #555555; border-radius: 8px; background: #ffffff;")
         layout.addWidget(self.qr_label, alignment=Qt.AlignCenter)
 
         self.status_label = QLabel("正在获取二维码...")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("color: #666; margin-top: 12px;")
+        self.status_label.setStyleSheet("color: #888888; background: transparent;")
         layout.addWidget(self.status_label)
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
         self.refresh_btn = QPushButton("刷新二维码")
+        self.refresh_btn.setObjectName("primary_btn")
         self.refresh_btn.clicked.connect(self._fetch_qr)
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
@@ -85,15 +92,15 @@ class QrLoginDialog(QDialog):
                 url = data["data"]["url"]
                 self._show_qr(url)
                 self.status_label.setText("请使用哔哩哔哩App扫码登录")
-                self.status_label.setStyleSheet("color: #666; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #aaaaaa; background: transparent;")
                 if not self.timer.isActive():
                     self.timer.start(3000)
             else:
                 self.status_label.setText(f"获取二维码失败: {data.get('message', '')}")
-                self.status_label.setStyleSheet("color: red; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #f44336; background: transparent;")
         except Exception as e:
             self.status_label.setText(f"获取二维码失败: {e}")
-            self.status_label.setStyleSheet("color: red; margin-top: 12px;")
+            self.status_label.setStyleSheet("color: #f44336; background: transparent;")
 
     def _show_qr(self, url: str):
         qr = qrcode.make(url)
@@ -123,17 +130,17 @@ class QrLoginDialog(QDialog):
 
             if poll_code == 86101:
                 self.status_label.setText("请使用哔哩哔哩App扫码登录")
-                self.status_label.setStyleSheet("color: #666; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #aaaaaa; background: transparent;")
             elif poll_code == 86090:
                 self.status_label.setText("已扫描，请在手机上确认登录")
-                self.status_label.setStyleSheet("color: orange; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #ff9800; background: transparent;")
             elif poll_code == 86038:
                 self.status_label.setText("二维码已过期，请点击刷新")
-                self.status_label.setStyleSheet("color: red; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #f44336; background: transparent;")
                 self.timer.stop()
             elif poll_code == 0:
                 self.status_label.setText("登录成功，正在获取Cookie...")
-                self.status_label.setStyleSheet("color: green; margin-top: 12px;")
+                self.status_label.setStyleSheet("color: #4CAF50; background: transparent;")
                 self.timer.stop()
                 self._fetch_cookies(poll_data.get("url", ""))
         except Exception:

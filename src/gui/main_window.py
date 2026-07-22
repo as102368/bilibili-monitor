@@ -49,6 +49,7 @@ from ..progress import (
     emit_upload_finished,
     emit_upload_progress,
 )
+from . import load_app_icon
 
 logger = get_logger(__name__)
 from .filename_template_builder import FilenameTemplateBuilder
@@ -62,10 +63,13 @@ class ConfigTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         # Cookie 配置
         cookie_group = QGroupBox("Cookie 配置")
         cookie_form = QFormLayout()
+        cookie_form.setSpacing(10)
+        cookie_form.setContentsMargins(8, 4, 8, 4)
         self.sessdata_edit = QLineEdit()
         self.bili_jct_edit = QLineEdit()
         self.buvid3_edit = QLineEdit()
@@ -80,6 +84,8 @@ class ConfigTab(QWidget):
         # 监控配置
         monitor_group = QGroupBox("监控配置")
         monitor_form = QFormLayout()
+        monitor_form.setSpacing(10)
+        monitor_form.setContentsMargins(8, 4, 8, 4)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(10, 3600)
         self.interval_spin.setSuffix(" 秒")
@@ -93,6 +99,8 @@ class ConfigTab(QWidget):
         # 城通网盘配置
         ctfile_group = QGroupBox("城通网盘配置")
         ctfile_form = QFormLayout()
+        ctfile_form.setSpacing(10)
+        ctfile_form.setContentsMargins(8, 4, 8, 4)
         self.ctfile_session_edit = QLineEdit()
         self.ctfile_folder_edit = QLineEdit()
         self.ctfile_upload_check = QCheckBox("下载后自动上传")
@@ -112,7 +120,7 @@ class ConfigTab(QWidget):
         # 保存按钮
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton("保存配置")
-        self.save_btn.setStyleSheet("font-weight: bold; padding: 6px 16px;")
+        self.save_btn.setObjectName("primary_btn")
         btn_layout.addStretch()
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
@@ -166,6 +174,8 @@ class HistoryTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         search_layout = QHBoxLayout()
         self.search_edit = QLineEdit()
@@ -205,9 +215,9 @@ class HistoryTab(QWidget):
         self.select_all_checkbox = QCheckBox("全选")
         self.select_all_checkbox.clicked.connect(self._on_select_all_clicked)
         self.redownload_btn = QPushButton("重新下载选中")
-        self.redownload_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 6px 12px;")
+        self.redownload_btn.setObjectName("primary_btn")
         self.batch_delete_btn = QPushButton("批量删除选中")
-        self.batch_delete_btn.setStyleSheet("background-color: #f44336; color: white; padding: 6px 12px;")
+        self.batch_delete_btn.setObjectName("danger_btn")
         self.refresh_btn = QPushButton("刷新")
         btn_layout.addWidget(self.select_all_checkbox)
         btn_layout.addWidget(self.redownload_btn)
@@ -287,6 +297,8 @@ class UploadTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         search_layout = QHBoxLayout()
         self.search_edit = QLineEdit()
@@ -331,7 +343,7 @@ class UploadTab(QWidget):
         self.select_all_checkbox = QCheckBox("全选")
         self.select_all_checkbox.clicked.connect(self._on_select_all_clicked)
         self.batch_delete_btn = QPushButton("批量删除选中")
-        self.batch_delete_btn.setStyleSheet("background-color: #f44336; color: white; padding: 6px 12px;")
+        self.batch_delete_btn.setObjectName("danger_btn")
         self.refresh_btn = QPushButton("刷新")
         btn_layout.addWidget(self.select_all_checkbox)
         btn_layout.addWidget(self.batch_delete_btn)
@@ -413,6 +425,8 @@ class FailureTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         search_layout = QHBoxLayout()
         self.search_edit = QLineEdit()
@@ -458,11 +472,11 @@ class FailureTab(QWidget):
         self.select_all_checkbox.clicked.connect(self._on_select_all_clicked)
         self.refresh_btn = QPushButton("刷新")
         self.retry_btn = QPushButton("重试选中项")
-        self.retry_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 6px 16px;")
+        self.retry_btn.setObjectName("primary_btn")
         self.delete_btn = QPushButton("删除选中项")
-        self.delete_btn.setStyleSheet("background-color: #f44336; color: white; padding: 6px 12px;")
+        self.delete_btn.setObjectName("danger_btn")
         self.batch_delete_btn = QPushButton("批量删除选中")
-        self.batch_delete_btn.setStyleSheet("background-color: #f44336; color: white; padding: 6px 12px;")
+        self.batch_delete_btn.setObjectName("danger_btn")
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #aaaaaa;")
         btn_layout.addWidget(self.select_all_checkbox)
@@ -561,7 +575,8 @@ class CtfileDeduplicateTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         info = QLabel(
             "说明: 城通网盘 API 未提供 MD5，当前按「文件名相似度 ≥ 95% 且大小相同」判断重复，"
@@ -610,11 +625,12 @@ class CtfileDeduplicateTab(QWidget):
         # 本地同步
         sync_group = QGroupBox("本地同步")
         sync_layout = QHBoxLayout(sync_group)
+        sync_layout.setContentsMargins(8, 4, 8, 4)
         self.sync_dir_edit = QLineEdit(r"D:\BI\bilibili-monitor\downloads")
         self.sync_browse_btn = QPushButton("浏览...")
         self.sync_browse_btn.clicked.connect(self._choose_sync_dir)
         self.sync_btn = QPushButton("同步本地文件")
-        self.sync_btn.setStyleSheet("padding: 6px 16px;")
+        self.sync_btn.setObjectName("primary_btn")
         sync_layout.addWidget(QLabel("本地目录:"))
         sync_layout.addWidget(self.sync_dir_edit, 1)
         sync_layout.addWidget(self.sync_browse_btn)
@@ -623,12 +639,10 @@ class CtfileDeduplicateTab(QWidget):
 
         btn_layout = QHBoxLayout()
         self.scan_btn = QPushButton("扫描重复文件")
-        self.scan_btn.setStyleSheet("padding: 6px 16px;")
+        self.scan_btn.setObjectName("primary_btn")
         self.delete_btn = QPushButton("删除重复文件")
         self.delete_btn.setEnabled(False)
-        self.delete_btn.setStyleSheet(
-            "background-color: #f44336; color: white; font-weight: bold; padding: 6px 16px;"
-        )
+        self.delete_btn.setObjectName("danger_btn")
         btn_layout.addWidget(self.scan_btn)
         btn_layout.addWidget(self.delete_btn)
         btn_layout.addStretch()
@@ -695,13 +709,17 @@ class SettingsTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         # 下载设置
         download_group = QGroupBox("下载设置")
         download_layout = QVBoxLayout(download_group)
         download_layout.setSpacing(10)
+        download_layout.setContentsMargins(8, 4, 8, 4)
 
         download_form = QFormLayout()
+        download_form.setSpacing(10)
+        download_form.setContentsMargins(0, 0, 0, 0)
         self.output_dir_edit = QLineEdit()
         self.output_dir_btn = QPushButton("浏览...")
         self.output_dir_btn.clicked.connect(self._choose_dir)
@@ -735,7 +753,7 @@ class SettingsTab(QWidget):
         # 保存按钮
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton("保存配置")
-        self.save_btn.setStyleSheet("font-weight: bold; padding: 6px 16px;")
+        self.save_btn.setObjectName("primary_btn")
         btn_layout.addStretch()
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
@@ -786,10 +804,13 @@ class BatchDownloadTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         # 扫描设置
         settings_group = QGroupBox("扫描设置")
         settings_layout = QFormLayout()
+        settings_layout.setSpacing(10)
+        settings_layout.setContentsMargins(8, 4, 8, 4)
 
         self.start_time_edit = QDateTimeEdit()
         self.start_time_edit.setCalendarPopup(True)
@@ -819,13 +840,9 @@ class BatchDownloadTab(QWidget):
         # 按钮
         btn_layout = QHBoxLayout()
         self.scan_btn = QPushButton("扫描视频")
-        self.scan_btn.setStyleSheet(
-            "background-color: #2196F3; color: white; font-weight: bold; padding: 6px 16px;"
-        )
+        self.scan_btn.setObjectName("primary_btn")
         self.download_btn = QPushButton("下载选中")
-        self.download_btn.setStyleSheet(
-            "background-color: #4CAF50; color: white; font-weight: bold; padding: 6px 16px;"
-        )
+        self.download_btn.setObjectName("success_btn")
         self.download_btn.setEnabled(False)
         self.select_all_checkbox = QCheckBox("全选")
         self.select_all_checkbox.setChecked(True)
@@ -838,7 +855,7 @@ class BatchDownloadTab(QWidget):
 
         # 批量下载进度
         self.progress_label = QLabel("下载进度: 0/0")
-        self.progress_label.setStyleSheet("font-size: 13px; color: #cccccc;")
+        self.progress_label.setStyleSheet("font-size: 13px; color: #aaaaaa; background: transparent;")
         layout.addWidget(self.progress_label)
 
         # 结果表格
@@ -929,13 +946,16 @@ class MainWindow(QMainWindow):
     def __init__(self, instance_running=False):
         super().__init__()
         self.setWindowTitle("Bilibili 动态监控")
-        self.setMinimumSize(900, 600)
+        self.setWindowIcon(load_app_icon())
+        self.setMinimumSize(1050, 720)
+        self.resize(1280, 860)
 
         self.monitor: BilibiliMonitor | None = None
         self.config = load_config() or {}
         self.instance_running = instance_running
         self.redownload_queue = []
         self.redownload_running = False
+        self._manual_upload_running = False  # 手动上传期间暂停 worker 健康检查
         self._active_bvids: set = set()  # 正在下载中的 BV，防止重复入队
         self._background_tasks: set = set()  # 独立后台任务集合
         self.user_face_url = ""
@@ -977,30 +997,49 @@ class MainWindow(QMainWindow):
         self._last_check_timer.start(5000)
         self._refresh_last_check_time()
 
+        # 定时检查上传 worker 健康状态，自动重启意外停止的 worker
+        self._upload_health_timer = QTimer(self)
+        self._upload_health_timer.timeout.connect(self._ensure_upload_worker_running)
+        self._upload_health_timer.start(30000)
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
 
         # 顶部标题栏 + 登录按钮
         header_layout = QHBoxLayout()
-        self.back_btn = QPushButton("< 返回")
-        self.back_btn.setStyleSheet("padding: 4px 12px;")
+        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(4, 4, 4, 4)
+
+        self.back_btn = QPushButton("← 返回")
+        self.back_btn.setObjectName("primary_btn")
+        self.back_btn.setCursor(Qt.PointingHandCursor)
         self.back_btn.clicked.connect(self._on_back_to_home)
         self.back_btn.hide()
+
         self.title_label = QLabel("Bilibili 动态监控")
-        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.title_label.setObjectName("title_label")
+
         self.login_btn = QPushButton("扫码登录")
-        self.login_btn.setStyleSheet("padding: 4px 14px;")
+        self.login_btn.setObjectName("primary_btn")
+        self.login_btn.setCursor(Qt.PointingHandCursor)
         self.login_btn.clicked.connect(self._on_qr_login)
+
         self.avatar_btn = QPushButton()
-        self.avatar_btn.setFixedSize(32, 32)
-        self.avatar_btn.setStyleSheet("border-radius: 16px; border: none; padding: 0px;")
+        self.avatar_btn.setFixedSize(36, 36)
+        self.avatar_btn.setStyleSheet(
+            "QPushButton { border-radius: 18px; border: 2px solid #444444; padding: 0px; background-color: #2a2a2a; }"
+            "QPushButton:hover { border-color: #2196F3; }"
+        )
         self.avatar_btn.setCursor(Qt.PointingHandCursor)
         self.avatar_btn.clicked.connect(self._on_open_user_center)
         self.avatar_btn.hide()
+
         self.user_info_label = QLabel("")
-        self.user_info_label.setStyleSheet("color: #cccccc; font-size: 12px;")
+        self.user_info_label.setStyleSheet("color: #aaaaaa; font-size: 12px; background: transparent;")
         self.user_info_label.hide()
         header_layout.addWidget(self.back_btn)
         header_layout.addWidget(self.title_label)
@@ -1016,7 +1055,7 @@ class MainWindow(QMainWindow):
         self.console_tab = QWidget()
         console_layout = QVBoxLayout(self.console_tab)
         self.status_label = QLabel("状态: 未启动")
-        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; background: transparent;")
         console_layout.addWidget(self.status_label)
 
         self.log_edit = QTextEdit()
@@ -1025,7 +1064,7 @@ class MainWindow(QMainWindow):
 
         if self.instance_running:
             self.status_label.setText("状态: 已有实例在运行")
-            self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: orange;")
+            self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #ff9800; background: transparent;")
 
         self.tabs.addTab(self.console_tab, "控制台")
 
@@ -1256,6 +1295,8 @@ class MainWindow(QMainWindow):
                 folder_id=ctfile_cfg.get("folder_id", "0"),
             )
         self.upload_manager.set_uploader(uploader)
+        if want_enabled:
+            asyncio.create_task(self.upload_manager.start_worker())
 
         # 同步配置页复选框
         self.config_tab.ctfile_upload_check.setChecked(want_enabled)
@@ -1650,11 +1691,41 @@ class MainWindow(QMainWindow):
             logger.info(f"[ManualUpload] 用户确认，开始创建上传任务，文件数: {len(files)}")
             self.status_tab.upload_btn.setEnabled(False)
             QMessageBox.information(self, "开始上传", f"已开始上传 {len(files)} 个文件，可在运行状态页查看进度")
-            asyncio.create_task(self._do_manual_upload_all(files, ctfile_cfg))
+            asyncio.create_task(self._run_manual_upload_with_worker_pause(files, ctfile_cfg))
         except Exception as e:
             logger.exception("[ManualUpload] 启动手动上传失败")
             self.status_tab.upload_btn.setEnabled(True)
             QMessageBox.critical(self, "错误", f"启动上传失败: {e}")
+
+
+    async def _run_manual_upload_with_worker_pause(self, files: list, ctfile_cfg: dict):
+        """手动上传前暂停后台自动上传 worker，完成后恢复，避免两者冲突导致 worker 卡死。"""
+        auto_upload_enabled = bool(self.config.get("ctfile", {}).get("upload_after_download"))
+        if auto_upload_enabled:
+            logger.info("[ManualUpload] 暂停后台自动上传 worker，开始手动上传")
+            await self.upload_manager.stop_worker()
+        self._manual_upload_running = True
+        try:
+            await self._do_manual_upload_all(files, ctfile_cfg)
+        finally:
+            self._manual_upload_running = False
+            if auto_upload_enabled:
+                logger.info("[ManualUpload] 手动上传结束，恢复后台自动上传 worker")
+                await self.upload_manager.start_worker()
+
+    def _ensure_upload_worker_running(self):
+        """健康检查：若已启用自动上传但 worker 已停止，则自动重启。"""
+        if self._manual_upload_running:
+            return
+        ctfile_cfg = self.config.get("ctfile", {})
+        if not ctfile_cfg.get("upload_after_download"):
+            return
+        if not ctfile_cfg.get("session"):
+            return
+        task = self.upload_manager._worker_task
+        if task is None or task.done():
+            logger.info("[MainWindow] 检测到上传 worker 未运行，自动重启")
+            asyncio.create_task(self.upload_manager.start_worker())
 
     async def _do_manual_upload_all(self, files: list, ctfile_cfg: dict):
         total = len(files)

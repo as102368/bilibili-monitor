@@ -29,12 +29,14 @@ class StatusTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         # 后台任务控制面板
         control_group = QGroupBox("后台任务控制")
         control_layout = QGridLayout(control_group)
         control_layout.setSpacing(10)
+        control_layout.setContentsMargins(12, 10, 12, 10)
 
         # 动态监控
         control_layout.addWidget(QLabel("动态监控:"), 0, 0)
@@ -42,15 +44,11 @@ class StatusTab(QWidget):
         self.monitor_status_label.setStyleSheet("color: #f44336; font-weight: bold;")
         control_layout.addWidget(self.monitor_status_label, 0, 1)
         self.monitor_start_btn = QPushButton("启动监控")
-        self.monitor_start_btn.setStyleSheet(
-            "background-color: #4CAF50; color: white; font-weight: bold; padding: 4px 14px;"
-        )
+        self.monitor_start_btn.setObjectName("success_btn")
         control_layout.addWidget(self.monitor_start_btn, 0, 2)
         self.monitor_stop_btn = QPushButton("停止监控")
         self.monitor_stop_btn.setEnabled(False)
-        self.monitor_stop_btn.setStyleSheet(
-            "background-color: #f44336; color: white; font-weight: bold; padding: 4px 14px;"
-        )
+        self.monitor_stop_btn.setObjectName("danger_btn")
         control_layout.addWidget(self.monitor_stop_btn, 0, 3)
         control_layout.setColumnStretch(4, 1)
 
@@ -60,9 +58,7 @@ class StatusTab(QWidget):
         self.auto_upload_status_label.setStyleSheet("color: #888888; font-weight: bold;")
         control_layout.addWidget(self.auto_upload_status_label, 1, 1)
         self.auto_upload_btn = QPushButton("启用自动上传")
-        self.auto_upload_btn.setStyleSheet(
-            "background-color: #2196F3; color: white; font-weight: bold; padding: 4px 14px;"
-        )
+        self.auto_upload_btn.setObjectName("primary_btn")
         control_layout.addWidget(self.auto_upload_btn, 1, 2)
         control_layout.setColumnStretch(4, 1)
 
@@ -80,6 +76,8 @@ class StatusTab(QWidget):
         # 下载区域
         download_group = QGroupBox("下载队列")
         download_layout = QVBoxLayout(download_group)
+        download_layout.setSpacing(8)
+        download_layout.setContentsMargins(10, 8, 10, 10)
         self.download_table = QTableWidget()
         self.download_table.setColumnCount(4)
         self.download_table.setHorizontalHeaderLabels(["BV号", "标题", "UP主", "进度"])
@@ -99,9 +97,11 @@ class StatusTab(QWidget):
         # 上传区域
         upload_group = QGroupBox("上传队列")
         upload_layout = QVBoxLayout(upload_group)
+        upload_layout.setSpacing(8)
+        upload_layout.setContentsMargins(10, 8, 10, 10)
         upload_btn_layout = QHBoxLayout()
         self.upload_btn = QPushButton("开始上传")
-        self.upload_btn.setStyleSheet("font-weight: bold; padding: 6px 16px;")
+        self.upload_btn.setObjectName("primary_btn")
         upload_btn_layout.addWidget(self.upload_btn)
         upload_btn_layout.addStretch()
         upload_layout.addLayout(upload_btn_layout)

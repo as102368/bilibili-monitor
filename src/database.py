@@ -383,13 +383,13 @@ class DownloadDB:
             return cur.fetchone() is not None
 
     def deduplicate_uploads(self) -> int:
-        """清理 uploads 表中按 file_name 重复的记录，保留 id 最大的一条。返回删除数量。"""
+        """清理 uploads 表中按 file_name 重复的记录，优先保留成功记录，否则保留最新记录。返回删除数量。"""
         with self._locked():
             total_before = self.conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0]
             if total_before == 0:
                 return 0
 
-            # 使用临时表保留最新记录，再清空原表回插，比大批量 DELETE 更快
+            # 使用临时表保留成功/最新记录，再清空原表回插，比大批量 DELETE 更快
             self.conn.execute("""
                 CREATE TEMPORARY TABLE IF NOT EXISTS _uploads_keep AS
                 SELECT * FROM uploads WHERE 0=1
@@ -398,7 +398,16 @@ class DownloadDB:
             self.conn.execute("""
                 INSERT INTO _uploads_keep
                 SELECT * FROM uploads
-                WHERE id IN (SELECT MAX(id) FROM uploads GROUP BY file_name)
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY file_name
+                                ORDER BY CASE status WHEN 'success' THEN 0 ELSE 1 END, id DESC
+                            ) AS rn
+                        FROM uploads
+                    ) WHERE rn = 1
+                )
             """)
             self.conn.execute("DELETE FROM uploads")
             self.conn.execute("""

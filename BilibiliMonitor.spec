@@ -4,6 +4,7 @@ import shiboken6
 
 
 SHIBOKEN6_DIR = os.path.dirname(shiboken6.__file__)
+ICON_PATH = os.path.join('data', 'icon.ico')
 
 
 a = Analysis(
@@ -15,6 +16,7 @@ a = Analysis(
         ('tools/aria2', 'tools/aria2'),
         ('config.yaml', '.'),
         ('src', 'src'),
+        ('data/icon.png', 'data'),
         (SHIBOKEN6_DIR, 'shiboken6'),
     ],
     hiddenimports=[
@@ -68,6 +70,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=ICON_PATH,
 )
 coll = COLLECT(
     exe,

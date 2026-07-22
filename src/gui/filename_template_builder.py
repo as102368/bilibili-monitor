@@ -59,13 +59,14 @@ class FilenameTemplateBuilder(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(14, 14, 14, 14)
 
         # 可选字段区域
         avail_group = QWidget()
         avail_layout = QVBoxLayout(avail_group)
-        avail_layout.setContentsMargins(10, 10, 10, 10)
-        avail_layout.setSpacing(8)
+        avail_layout.setContentsMargins(18, 18, 18, 18)
+        avail_layout.setSpacing(10)
 
         avail_title = QLabel("可选字段:")
         avail_title.setStyleSheet("color: #cccccc; font-size: 13px;")
@@ -75,7 +76,7 @@ class FilenameTemplateBuilder(QWidget):
         fields_widget = QWidget()
         fields_grid = QGridLayout(fields_widget)
         fields_grid.setSpacing(6)
-        fields_grid.setContentsMargins(0, 0, 0, 0)
+        fields_grid.setContentsMargins(6, 6, 6, 6)
         col = 0
         row = 0
         for label, value in self.FIELDS:
@@ -85,16 +86,16 @@ class FilenameTemplateBuilder(QWidget):
             btn.setStyleSheet(
                 """
                 QPushButton {
-                    background-color: #4a4a4a;
-                    color: #ffffff;
-                    border: 1px solid #5a5a5a;
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: 1px solid #4a4a4a;
                     border-radius: 10px;
                     padding: 3px 10px;
                     font-size: 12px;
                 }
                 QPushButton:hover {
-                    background-color: #2196F3;
-                    border-color: #1976D2;
+                    background-color: #4a4a4a;
+                    border-color: #5a5a5a;
                 }
                 """
             )
@@ -110,7 +111,7 @@ class FilenameTemplateBuilder(QWidget):
         sep_widget = QWidget()
         sep_grid = QGridLayout(sep_widget)
         sep_grid.setSpacing(6)
-        sep_grid.setContentsMargins(0, 0, 0, 0)
+        sep_grid.setContentsMargins(6, 6, 6, 6)
         col = 0
         row = 0
         for label, value in self.SEPARATORS:
@@ -120,16 +121,16 @@ class FilenameTemplateBuilder(QWidget):
             btn.setStyleSheet(
                 """
                 QPushButton {
-                    background-color: #4a4a4a;
-                    color: #ffffff;
-                    border: 1px solid #5a5a5a;
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: 1px solid #4a4a4a;
                     border-radius: 10px;
                     padding: 3px 10px;
                     font-size: 12px;
                 }
                 QPushButton:hover {
-                    background-color: #2196F3;
-                    border-color: #1976D2;
+                    background-color: #4a4a4a;
+                    border-color: #5a5a5a;
                 }
                 """
             )
@@ -181,6 +182,7 @@ class FilenameTemplateBuilder(QWidget):
         # 底部选项
         options_layout = QHBoxLayout()
         options_layout.setSpacing(8)
+        options_layout.setContentsMargins(0, 8, 0, 0)
 
         options_layout.addWidget(QLabel("时间格式:"))
         self.time_format_combo = QComboBox()
@@ -197,6 +199,7 @@ class FilenameTemplateBuilder(QWidget):
         options_layout.addStretch()
 
         self.reset_btn = QPushButton("恢复默认")
+        self.reset_btn.setObjectName("primary_btn")
         self.reset_btn.clicked.connect(self._reset_default)
         options_layout.addWidget(self.reset_btn)
 
@@ -227,9 +230,9 @@ class FilenameTemplateBuilder(QWidget):
             btn.setStyleSheet(
                 """
                 QPushButton {
-                    background-color: #555555;
+                    background-color: #424242;
                     color: #ffffff;
-                    border: 1px solid #777777;
+                    border: 1px solid #5a5a5a;
                     border-radius: 10px;
                     padding: 3px 10px;
                     font-size: 12px;

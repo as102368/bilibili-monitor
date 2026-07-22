@@ -33,6 +33,7 @@ from PySide6.QtGui import QPixmap, QIcon, QPainter, QPainterPath
 from ..logger import get_logger
 from ..wbi import WBI
 from ..database import DownloadDB
+from . import load_app_icon
 
 logger = get_logger(__name__)
 
@@ -79,8 +80,7 @@ class UserCenterDialog(QWidget):
         download_all_callback: Optional[Callable[[List[Dict]], None]] = None,
     ):
         super().__init__(parent)
-        self.setMinimumSize(800, 650)
-        self.resize(1400, 850)
+        self.setMinimumSize(860, 560)
         self.web = web_client
         self.wbi = WBI(web_client.sessdata)
         self.db_path = db_path
@@ -100,8 +100,8 @@ class UserCenterDialog(QWidget):
         self._right_stack = self._build_stack()
 
         self._main_layout = QHBoxLayout(self)
-        self._main_layout.setContentsMargins(0, 0, 0, 0)
-        self._main_layout.setSpacing(0)
+        self._main_layout.setContentsMargins(10, 10, 10, 10)
+        self._main_layout.setSpacing(10)
         self._main_layout.addWidget(self._left_sidebar)
         self._main_layout.addWidget(self._right_stack, 1)
 
@@ -124,9 +124,9 @@ class UserCenterDialog(QWidget):
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
         self.nav_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.nav_list.setStyleSheet(
-            "QListWidget { border: none; border-radius: 6px; background-color: #2a2a2a; color: #eeeeee; outline: none; }"
+            "QListWidget { border: none; border-radius: 6px; background-color: #252525; color: #eeeeee; outline: none; }"
             "QListWidget::item { padding: 12px 14px; border-radius: 6px; }"
-            "QListWidget::item:hover { background-color: #3a3a3a; }"
+            "QListWidget::item:hover { background-color: #333333; }"
             "QListWidget::item:selected { background-color: #1E88E5; }"
         )
         left_layout.addWidget(self.nav_list)
@@ -172,8 +172,8 @@ class UserCenterDialog(QWidget):
     def _build_follow_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 顶部标题栏
         top = QHBoxLayout()
@@ -186,16 +186,14 @@ class UserCenterDialog(QWidget):
         top.addWidget(self.follow_count_label)
         refresh_btn = QPushButton("刷新")
         refresh_btn.setMinimumHeight(32)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background-color: #4a4a4a; }"
-        )
+
         refresh_btn.clicked.connect(self._load_followings)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
 
         # 关注表格：占满剩余高度，内容超出时滚动
         self.follow_table = QTableWidget()
+        self.follow_table.setAlternatingRowColors(True)
         self.follow_table.setColumnCount(3)
         self.follow_table.setHorizontalHeaderLabels(["", "昵称", "操作"])
         self.follow_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -224,9 +222,7 @@ class UserCenterDialog(QWidget):
         bottom.setMinimumHeight(52)
         bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
-            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
-            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QWidget { background-color: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
         bottom_layout = QHBoxLayout(bottom)
         bottom_layout.setContentsMargins(14, 10, 14, 10)
@@ -242,12 +238,7 @@ class UserCenterDialog(QWidget):
         download_btn.setMinimumHeight(38)
         download_btn.setMinimumWidth(220)
         download_btn.setCursor(Qt.PointingHandCursor)
-        download_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #1565C0; }"
-            "QPushButton:disabled { background-color: #555; color: #aaa; }"
-        )
+        download_btn.setObjectName("primary_btn")
         download_btn.clicked.connect(self._on_download_selected_follows)
         bottom_layout.addWidget(download_btn)
         layout.addWidget(bottom)
@@ -261,8 +252,8 @@ class UserCenterDialog(QWidget):
     def _build_group_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 顶部标题栏
         top = QHBoxLayout()
@@ -272,10 +263,7 @@ class UserCenterDialog(QWidget):
         top.addStretch()
         refresh_btn = QPushButton("刷新")
         refresh_btn.setMinimumHeight(32)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background-color: #4a4a4a; }"
-        )
+
         refresh_btn.clicked.connect(self._load_follow_groups)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
@@ -308,6 +296,7 @@ class UserCenterDialog(QWidget):
         member_area_layout.setSpacing(8)
 
         self.group_member_table = QTableWidget()
+        self.group_member_table.setAlternatingRowColors(True)
         self.group_member_table.setColumnCount(3)
         self.group_member_table.setHorizontalHeaderLabels(["", "昵称", "操作"])
         self.group_member_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -334,9 +323,7 @@ class UserCenterDialog(QWidget):
         bottom.setMinimumHeight(52)
         bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
-            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
-            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QWidget { background-color: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
         btn_layout = QHBoxLayout(bottom)
         btn_layout.setContentsMargins(14, 10, 14, 10)
@@ -348,11 +335,7 @@ class UserCenterDialog(QWidget):
         download_btn.setMinimumHeight(38)
         download_btn.setMinimumWidth(240)
         download_btn.setCursor(Qt.PointingHandCursor)
-        download_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #1565C0; }"
-        )
+        download_btn.setObjectName("primary_btn")
         download_btn.clicked.connect(self._on_download_selected_group_members)
         btn_layout.addWidget(download_btn)
         member_area_layout.addWidget(bottom)
@@ -364,8 +347,8 @@ class UserCenterDialog(QWidget):
     def _build_fav_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 顶部标题栏
         top = QHBoxLayout()
@@ -375,10 +358,7 @@ class UserCenterDialog(QWidget):
         top.addStretch()
         refresh_btn = QPushButton("刷新")
         refresh_btn.setMinimumHeight(32)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background-color: #4a4a4a; }"
-        )
+
         refresh_btn.clicked.connect(self._load_fav_folders)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
@@ -411,6 +391,7 @@ class UserCenterDialog(QWidget):
         video_area_layout.setSpacing(8)
 
         self.fav_video_table = QTableWidget()
+        self.fav_video_table.setAlternatingRowColors(True)
         self.fav_video_table.setColumnCount(7)
         self.fav_video_table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
         self.fav_video_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -444,9 +425,7 @@ class UserCenterDialog(QWidget):
         bottom.setMinimumHeight(52)
         bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
-            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
-            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QWidget { background-color: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
         btn_layout = QHBoxLayout(bottom)
         btn_layout.setContentsMargins(14, 10, 14, 10)
@@ -458,11 +437,7 @@ class UserCenterDialog(QWidget):
         download_btn.setMinimumHeight(38)
         download_btn.setMinimumWidth(180)
         download_btn.setCursor(Qt.PointingHandCursor)
-        download_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #1565C0; }"
-        )
+        download_btn.setObjectName("primary_btn")
         download_btn.clicked.connect(self._on_download_selected_fav_videos)
         btn_layout.addWidget(download_btn)
         video_area_layout.addWidget(bottom)
@@ -474,8 +449,8 @@ class UserCenterDialog(QWidget):
     def _build_video_list_page(self, title: str) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 顶部标题栏
         top = QHBoxLayout()
@@ -486,10 +461,7 @@ class UserCenterDialog(QWidget):
         refresh_btn = QPushButton("刷新")
         refresh_btn.setMinimumHeight(32)
         refresh_btn.setProperty("page_type", title)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background-color: #4a4a4a; }"
-        )
+
         refresh_btn.clicked.connect(self._on_video_page_refresh)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
@@ -502,6 +474,7 @@ class UserCenterDialog(QWidget):
         table_area_layout.setSpacing(8)
 
         table = QTableWidget()
+        table.setAlternatingRowColors(True)
         table.setColumnCount(7)
         table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "时间", "状态", "操作"])
         table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -535,9 +508,7 @@ class UserCenterDialog(QWidget):
         bottom.setMinimumHeight(52)
         bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
-            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
-            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QWidget { background-color: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
         btn_layout = QHBoxLayout(bottom)
         btn_layout.setContentsMargins(14, 10, 14, 10)
@@ -549,11 +520,7 @@ class UserCenterDialog(QWidget):
         download_btn.setMinimumHeight(38)
         download_btn.setMinimumWidth(180)
         download_btn.setCursor(Qt.PointingHandCursor)
-        download_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #1565C0; }"
-        )
+        download_btn.setObjectName("primary_btn")
         download_btn.clicked.connect(lambda: self._on_download_table_videos(table))
         btn_layout.addWidget(download_btn)
         table_area_layout.addWidget(bottom)
@@ -565,8 +532,8 @@ class UserCenterDialog(QWidget):
     def _build_subscription_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 顶部标题栏
         top = QHBoxLayout()
@@ -576,10 +543,7 @@ class UserCenterDialog(QWidget):
         top.addStretch()
         refresh_btn = QPushButton("刷新")
         refresh_btn.setMinimumHeight(32)
-        refresh_btn.setStyleSheet(
-            "QPushButton { background-color: #3a3a3a; color: #ffffff; border: 1px solid #555; border-radius: 4px; padding: 0 14px; }"
-            "QPushButton:hover { background-color: #4a4a4a; }"
-        )
+
         refresh_btn.clicked.connect(self._load_subscriptions)
         top.addWidget(refresh_btn)
         layout.addLayout(top)
@@ -592,6 +556,7 @@ class UserCenterDialog(QWidget):
         table_area_layout.setSpacing(8)
 
         self.sub_table = QTableWidget()
+        self.sub_table.setAlternatingRowColors(True)
         self.sub_table.setColumnCount(5)
         self.sub_table.setHorizontalHeaderLabels(["", "ID", "名称", "类型", "操作"])
         self.sub_table.setColumnWidth(0, 30)
@@ -617,9 +582,7 @@ class UserCenterDialog(QWidget):
         bottom.setMinimumHeight(52)
         bottom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         bottom.setStyleSheet(
-            "QWidget { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 8px; }"
-            "QCheckBox { color: #eeeeee; font-size: 13px; spacing: 6px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; }"
+            "QWidget { background-color: #252525; border: 1px solid #333333; border-radius: 8px; }"
         )
         btn_layout = QHBoxLayout(bottom)
         btn_layout.setContentsMargins(14, 10, 14, 10)
@@ -631,11 +594,7 @@ class UserCenterDialog(QWidget):
         download_btn.setMinimumHeight(38)
         download_btn.setMinimumWidth(180)
         download_btn.setCursor(Qt.PointingHandCursor)
-        download_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 0 20px; font-weight: bold; font-size: 13px; }"
-            "QPushButton:hover { background-color: #1976D2; }"
-            "QPushButton:pressed { background-color: #1565C0; }"
-        )
+        download_btn.setObjectName("primary_btn")
         download_btn.clicked.connect(self._on_download_selected_subscriptions)
         btn_layout.addWidget(download_btn)
         table_area_layout.addWidget(bottom)
@@ -1046,8 +1005,9 @@ class UpVideoDialog(QDialog):
     def __init__(self, web_client, mid: int, uname: str, db_path: str, download_callback: Callable, parent=None, wbi: Optional[WBI] = None):
         super().__init__(parent)
         self.setWindowTitle(f"{uname} 的视频列表")
-        self.setMinimumSize(1100, 700)
-        self.resize(1200, 750)
+        self.setWindowIcon(load_app_icon())
+        self.setMinimumSize(900, 600)
+        self.resize(1000, 650)
         self.web = web_client
         self.mid = mid
         self.uname = uname
@@ -1062,10 +1022,14 @@ class UpVideoDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel(f"UP主: {self.uname}"))
+        top.setSpacing(10)
+        title = QLabel(f"UP主: {self.uname}")
+        title.setObjectName("title_label")
+        top.addWidget(title)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
         refresh_btn.clicked.connect(self._load_videos)
@@ -1073,6 +1037,7 @@ class UpVideoDialog(QDialog):
         layout.addLayout(top)
 
         self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "发布时间", "时长", "状态", "操作"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1095,11 +1060,15 @@ class UpVideoDialog(QDialog):
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
         self.select_all = QCheckBox("全选")
         self.select_all.clicked.connect(lambda checked: self._on_select_all(checked))
         btn_layout.addWidget(self.select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中视频")
+        download_btn.setObjectName("primary_btn")
+        download_btn.setMinimumHeight(34)
+        download_btn.setCursor(Qt.PointingHandCursor)
         download_btn.clicked.connect(self._on_download_selected)
         btn_layout.addWidget(download_btn)
         layout.addLayout(btn_layout)
@@ -1178,8 +1147,9 @@ class FavVideoDialog(QDialog):
     def __init__(self, web_client, media_id: int, title: str, db_path: str, download_callback: Callable, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"收藏夹: {title}")
-        self.setMinimumSize(1100, 700)
-        self.resize(1200, 750)
+        self.setWindowIcon(load_app_icon())
+        self.setMinimumSize(900, 600)
+        self.resize(1000, 650)
         self.web = web_client
         self.media_id = media_id
         self.db_path = db_path
@@ -1192,10 +1162,14 @@ class FavVideoDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel(f"收藏夹: {self.windowTitle()}"))
+        top.setSpacing(10)
+        title = QLabel(f"收藏夹: {self.windowTitle()}")
+        title.setObjectName("title_label")
+        top.addWidget(title)
         top.addStretch()
         refresh_btn = QPushButton("刷新")
         refresh_btn.clicked.connect(self._load_videos)
@@ -1203,6 +1177,7 @@ class FavVideoDialog(QDialog):
         layout.addLayout(top)
 
         self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["", "BV号", "标题", "UP主", "收藏时间", "状态", "操作"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1225,11 +1200,15 @@ class FavVideoDialog(QDialog):
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
         self.select_all = QCheckBox("全选")
         self.select_all.clicked.connect(lambda checked: self._on_select_all(checked))
         btn_layout.addWidget(self.select_all)
         btn_layout.addStretch()
         download_btn = QPushButton("批量下载选中视频")
+        download_btn.setObjectName("primary_btn")
+        download_btn.setMinimumHeight(34)
+        download_btn.setCursor(Qt.PointingHandCursor)
         download_btn.clicked.connect(self._on_download_selected)
         btn_layout.addWidget(download_btn)
         layout.addLayout(btn_layout)

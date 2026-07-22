@@ -40,10 +40,14 @@ def main():
                 shutil.copy2(internal_config, config_path)
 
     import qasync
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
     from src.gui.main_window import MainWindow
+    from src.gui import load_app_icon, apply_global_style
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(load_app_icon())
+    apply_global_style(app)
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 

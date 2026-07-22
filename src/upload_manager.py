@@ -77,9 +77,13 @@ class UploadManager:
         self.uploader = ctfile_uploader
 
     def pending_upload_count(self) -> int:
-        """返回当前待上传队列长度。"""
+        """返回当前待上传队列长度（先清理已不存在的记录，确保统计准确）。"""
         try:
-            return self._get_db().count_pending_uploads()
+            db = self._get_db()
+            cleaned = self._cleanup_missing_pending_files(db)
+            if cleaned:
+                logger.info(f"[UploadManager] pending 统计前清理 {cleaned} 个缺失记录")
+            return db.count_pending_uploads()
         except Exception as e:
             logger.warning(f"[UploadManager] 查询待上传数量失败: {e}")
             return 0
@@ -119,6 +123,45 @@ class UploadManager:
                 pass
         if deleted:
             logger.info(f"[UploadManager] 共清理 {deleted} 个孤立 m4s 文件")
+
+    def _cleanup_aria2_files(self, now: float):
+        """清理 Aria2 残留的 .aria2 控制文件。
+
+        Aria2 在下载时为输出文件生成 ``<输出文件名>.aria2`` 控制文件，正常完成/取消
+        后会自动删除。若进程被强制终止或崩溃，控制文件会残留；这里删除对应输出文件
+        已不存在或已经完成的控制文件，避免目录无限增长。
+        """
+        if not os.path.isdir(self.download_dir):
+            return
+        deleted = 0
+        for name in os.listdir(self.download_dir):
+            if not name.lower().endswith(".aria2"):
+                continue
+            file_path = os.path.join(self.download_dir, name)
+            if not os.path.isfile(file_path):
+                continue
+            base_name = name[: -len(".aria2")]
+            base_path = os.path.join(self.download_dir, base_name)
+            # 若对应输出文件已不存在，控制文件已无意义
+            if not os.path.isfile(base_path):
+                remove = True
+            else:
+                # 输出文件已存在时，只删除已经稳定完成一段时间的控制文件，
+                # 避免误删正在活跃下载中的控制文件
+                try:
+                    mtime = os.path.getmtime(base_path)
+                    remove = now - mtime >= 60
+                except OSError:
+                    continue
+            if remove:
+                try:
+                    os.remove(file_path)
+                    deleted += 1
+                    logger.info(f"[UploadManager] 清理 Aria2 残留控制文件: {name}")
+                except OSError:
+                    pass
+        if deleted:
+            logger.info(f"[UploadManager] 共清理 {deleted} 个 Aria2 控制文件")
 
     def _is_already_uploaded(self, file_name: str) -> bool:
         """检查数据库中是否已有该文件名的成功上传记录。"""
@@ -170,27 +213,13 @@ class UploadManager:
         """清理本地文件已不存在的 pending 记录，避免僵尸记录占满队列。"""
         try:
             pending = db.get_pending_uploads(limit=100000)
-            missing = [r for r in pending if not os.path.isfile(r.get("file_path", ""))]
-            if not missing:
+            missing_ids = [
+                r["id"] for r in pending if not os.path.isfile(r.get("file_path", ""))
+            ]
+            if not missing_ids:
                 return 0
-            cleaned = 0
-            for record in missing:
-                try:
-                    self._mark_failed(
-                        db=db,
-                        record_id=record["id"],
-                        file_name=record["file_name"],
-                        bvid=record.get("bvid", ""),
-                        title=record.get("title", "") or record["file_name"],
-                        uploader=record.get("uploader", ""),
-                        file_size=record.get("file_size", 0) or 0,
-                        reason="本地文件不存在",
-                        failed_records=None,
-                        emit_signal=False,
-                    )
-                    cleaned += 1
-                except Exception as e:
-                    logger.warning(f"[UploadManager] 清理缺失记录失败 {record.get('file_name')}: {e}")
+            db.delete_upload_records(missing_ids)
+            cleaned = len(missing_ids)
             logger.info(f"[UploadManager] 已清理 {cleaned} 个本地文件不存在的待上传记录")
             return cleaned
         except Exception as e:
@@ -205,6 +234,8 @@ class UploadManager:
         now = time.time()
         # 先清理合成失败的孤立 m4s
         self._cleanup_failed_m4s(now)
+        # 再清理 Aria2 残留控制文件
+        self._cleanup_aria2_files(now)
 
         db = self._get_db()
 
@@ -315,6 +346,8 @@ class UploadManager:
             if not self._uploader_missing_logged:
                 logger.warning("[UploadManager] 未配置城通网盘上传器，跳过上传")
                 self._uploader_missing_logged = True
+            # 避免无上传器时 CPU/日志空转
+            await asyncio.sleep(self.BATCH_INTERVAL)
             return
         self._uploader_missing_logged = False
 
