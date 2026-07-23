@@ -109,6 +109,33 @@ def _restore_user_data(source_dir: str, target_dir: str):
             print(f"[Pack] 还原 {name} 失败: {e}")
 
 
+def _copy_internal_with_robocopy(src: str, dst: str):
+    """使用 robocopy 复制 _internal 目录，避免 Windows 长路径问题。"""
+    import subprocess
+
+    os.makedirs(dst, exist_ok=True)
+    # /MIR：镜像同步；/E：包含空目录；/R:3 /W:5：失败重试 3 次，间隔 5 秒；/MT:8：多线程
+    cmd = [
+        "robocopy",
+        src,
+        dst,
+        "/MIR",
+        "/R:3",
+        "/W:5",
+        "/MT:8",
+        "/NP",
+        "/NFL",
+        "/NDL",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # robocopy 退出码 0-7 通常表示成功（含文件被复制/跳过的正常情况）
+    if result.returncode >= 8:
+        raise RuntimeError(
+            f"robocopy 复制 _internal 失败 (exit {result.returncode}): {result.stdout}\n{result.stderr}"
+        )
+    print(f"[Pack] robocopy 复制完成 (exit {result.returncode})")
+
+
 def replace_dist():
     """用新构建的 dist 替换目标目录，并自动还原用户数据。
 
@@ -149,7 +176,11 @@ def replace_dist():
             sys.exit(1)
         src = os.path.join(NEW_DIST_PATH, name)
         try:
-            if os.path.isdir(src):
+            if name == "_internal" and os.path.isdir(src):
+                # _internal 可能包含超长路径，shutil.copytree 在 Windows 上容易失败，
+                # 改用 robocopy 保证完整复制。
+                _copy_internal_with_robocopy(src, dst)
+            elif os.path.isdir(src):
                 shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
@@ -163,6 +194,13 @@ def replace_dist():
     if not os.path.isfile(exe_path):
         print(f"[Pack] 错误: 发布目录中找不到 {EXE_NAME}")
         sys.exit(1)
+
+    # 验证 _internal 关键文件存在，防止复制不完整导致启动失败
+    base_lib = os.path.join(TARGET_DIST_DIR, "_internal", "base_library.zip")
+    if not os.path.isfile(base_lib):
+        print(f"[Pack] 错误: _internal 中缺少 {base_lib}，复制可能不完整")
+        sys.exit(1)
+    print("[Pack] _internal 完整性检查通过")
 
     # 还原用户数据
     _restore_user_data(TARGET_DIST_OLD_DIR, TARGET_DIST_DIR)
